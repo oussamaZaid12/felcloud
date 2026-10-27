@@ -60,8 +60,8 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}[a-z0-9]$")
 def _valid_project(value):
     if not NAME_RE.match(value):
         return "3 à 32 caractères : minuscules, chiffres et tirets, en commençant par une lettre."
-    if (config.PROJECTS_DIR / value).exists():
-        return f"Le projet {config.PROJECTS_DIR / value} existe déjà : choisis un autre nom."
+    if (config.projects_dir() / value).exists():
+        return f"Le projet {config.projects_dir() / value} existe déjà : choisis un autre nom."
     return True
 
 

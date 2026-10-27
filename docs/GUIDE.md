@@ -15,7 +15,7 @@
 
 Les particularités de FelCloud sont gérées automatiquement : accès Internet des machines privées par un bastion et son proxy, allocation fiable des IP publiques, IP réutilisées, rebond SSH vers les machines privées.
 
-> **État actuel :** identifiants, génération et pilotage de projets **Terraform** et **Pulumi (Python)** terminés et testés sur FelCloud. Voir la [feuille de route](#feuille-de-route).
+> **État actuel :** identifiants, génération et pilotage de projets **Terraform** et **Pulumi (Python, JavaScript, Go)** terminés et testés sur FelCloud. Voir la [feuille de route](#feuille-de-route).
 
 ---
 
@@ -25,35 +25,21 @@ Suis ces étapes dans l'ordre. Les étapes 1 à 4 ne se font **qu'une seule fois
 
 ### Étape 1 — Vérifier ta machine
 
-Il te faut **Linux**, **Python 3.10 ou plus** et **Git** :
-
-```bash
-python3 --version     # doit afficher 3.10 ou plus
-git --version
-```
-
-S'il en manque un (Ubuntu/Debian) : `sudo apt install python3 python3-venv git`
+Il te faut **Linux** (Ubuntu, Debian, Fedora, Arch...) ou **macOS**, avec `curl` (présent presque partout ; sinon `sudo apt install curl`). Python n'est pas obligatoire : l'installation en télécharge un si besoin.
 
 ### Étape 2 — Installer felcloud
 
 ```bash
-git clone <URL-du-dépôt> FelcloudGuide
-cd FelcloudGuide
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/oussamaZaid12/felcloud/main/install.sh | bash
 ```
 
-Puis vérifie :
+Puis, dans un **nouveau terminal**, vérifie :
 
 ```bash
 felcloud --version
 ```
 
-Si le terminal répond `command not found`, ajoute `~/.local/bin` à ton PATH (le script t'a affiché la commande exacte), puis ouvre un nouveau terminal :
-
-```bash
-fish_add_path ~/.local/bin                                            # fish
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc   # bash
-```
+Le script ajoute lui-même `~/.local/bin` au PATH (bash, zsh et fish) : si `command not found` s'affiche, c'est que le terminal a été ouvert avant l'installation.
 
 ### Étape 3 — Créer tes identifiants dans Skyline
 
@@ -167,9 +153,8 @@ Le reste de ce document détaille chaque étape et les cas particuliers.
 
 | Élément | Comment vérifier | Si absent |
 |---|---|---|
-| Linux | — | felcloud ne fonctionne que sous Linux |
-| Python 3.10 ou plus | `python3 --version` | `sudo apt install python3 python3-venv` (Ubuntu/Debian) |
-| Git | `git --version` | `sudo apt install git` |
+| Linux ou macOS | — | Windows : pas encore pris en charge |
+| curl | `curl --version` | `sudo apt install curl` (Ubuntu/Debian) |
 | Un compte FelCloud | accès à la console Skyline | demande-le à ton responsable ou à ton enseignant |
 
 Pas besoin de droits administrateur (`sudo`) pour installer felcloud lui-même.
@@ -177,17 +162,18 @@ Pas besoin de droits administrateur (`sudo`) pour installer felcloud lui-même.
 ## 2. Installation
 
 ```bash
-git clone <URL-du-dépôt> FelcloudGuide
-cd FelcloudGuide
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/oussamaZaid12/felcloud/main/install.sh | bash
 ```
+
+Fonctionne sous Linux et macOS. Pour travailler sur le code : `git clone https://github.com/oussamaZaid12/felcloud.git && cd felcloud && ./install.sh --dev`.
 
 Le script :
 
-1. vérifie que Python est assez récent,
+1. utilise le Python de la machine s'il est assez récent, sinon en télécharge un réservé à felcloud (avec uv),
 2. crée un environnement isolé dans `~/.local/share/felcloud/` (rien n'est installé dans ton système),
 3. installe les dépendances,
-4. rend la commande `felcloud` disponible dans `~/.local/bin/`.
+4. rend la commande `felcloud` disponible dans `~/.local/bin/` et ajoute ce dossier au PATH,
+5. lance `felcloud setup`.
 
 **Si le terminal répond `felcloud: command not found`**, c'est que `~/.local/bin` n'est pas dans ton `PATH`. Le script t'affiche la commande exacte à lancer selon ton shell :
 
@@ -370,11 +356,11 @@ Tes machines de travail restent privées : seul le bastion est exposé sur Inter
 
 ### Où sont rangés tes projets
 
-Chaque projet est créé dans **`~/felcloud-projets/<nom>/`**, un dossier permanent. Ne crée pas de projet dans `/tmp` : ce dossier est effacé au redémarrage, et avec lui le fichier `terraform.tfstate`, sans lequel Terraform ne sait plus quoi supprimer sur le cloud. felcloud t'avertit si tu essaies.
+Chaque projet est créé dans **le dossier des projets que tu as choisi** pendant `felcloud setup` (par défaut `~/felcloud-projets/`), dans un sous-dossier `<nom>/`. Pour le changer : `felcloud setup` → « Changer le dossier de mes projets » (les projets existants restent où ils sont et `felcloud projets` les liste toujours). Ne crée pas de projet dans `/tmp` : ce dossier est effacé au redémarrage, et avec lui le fichier `terraform.tfstate`, sans lequel Terraform ne sait plus quoi supprimer sur le cloud. felcloud t'avertit si tu essaies.
 
 | Quoi | Où |
 |---|---|
-| Tes projets | `~/felcloud-projets/<nom>/` |
+| Tes projets | `<dossier des projets>/<nom>/` (par défaut `~/felcloud-projets/`) |
 | Clé SSH d'un projet | `~/.ssh/<nom>-key` (privée) et `~/.ssh/<nom>-key.pub` (publique) |
 | Tes identifiants | `~/.config/openstack/clouds.yaml` |
 | Préférences de felcloud | `~/.config/felcloud/config.yaml` |
@@ -507,7 +493,7 @@ Tu peux y ranger **plusieurs clouds** (un par projet, par exemple), chacun sous 
 | `felcloud install pulumi` | installer Pulumi sans sudo |
 | `felcloud install node` | installer Node.js (Pulumi en JavaScript) |
 | `felcloud install go` | installer Go (Pulumi en Go) |
-| `felcloud new` | créer un nouveau projet avec l'assistant (dans `~/felcloud-projets/`) |
+| `felcloud new` | créer un nouveau projet avec l'assistant (dans le dossier des projets) |
 | `felcloud new --answers FICHIER [--output DOSSIER]` | regénérer un projet à partir de ses réponses |
 | `felcloud projets` | lister tes projets et leur état |
 | `felcloud test [PROJET]` | vérifier que les machines d'un projet répondent en SSH |

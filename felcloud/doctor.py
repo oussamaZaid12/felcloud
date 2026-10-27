@@ -12,7 +12,8 @@ PULUMI_FALLBACK = Path.home() / ".pulumi" / "bin" / "pulumi"
 INSTALL_HINTS = {
     "terraform": "felcloud install terraform   (ou https://developer.hashicorp.com/terraform/install)",
     "pulumi": "felcloud install pulumi",
-    "ssh": "sudo apt install openssh-client   (ou pacman -S openssh, dnf install openssh-clients)",
+    "ssh": "sudo apt install openssh-client   (ou pacman -S openssh, dnf install openssh-clients ; "
+           "déjà présent sur macOS)",
 }
 
 

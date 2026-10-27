@@ -15,6 +15,17 @@ from felcloud import ui
 BIN_DIR = Path.home() / ".local" / "bin"
 RELEASES = "https://releases.hashicorp.com/terraform"
 ARCHS = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+# Nom du système dans les archives des éditeurs (identique pour les quatre outils).
+OS_NAME = {"Linux": "linux", "Darwin": "darwin"}.get(platform.system())
+
+
+def _unsupported():
+    """Message d'erreur si ce système ou ce processeur n'est pas pris en charge, sinon None."""
+    if not OS_NAME:
+        return f"Système non pris en charge : {platform.system()} (Linux et macOS uniquement)"
+    if platform.machine().lower() not in ARCHS:
+        return f"Architecture non prise en charge : {platform.machine()}"
+    return None
 
 
 def _get(url):
@@ -23,15 +34,16 @@ def _get(url):
 
 
 def install_terraform():
-    arch = ARCHS.get(platform.machine().lower())
-    if not arch:
-        ui.err(f"Architecture non prise en charge : {platform.machine()}")
+    problem = _unsupported()
+    if problem:
+        ui.err(problem)
         return 1
+    arch = ARCHS[platform.machine().lower()]
 
     with ui.console.status("Recherche de la dernière version de Terraform..."):
         version = json.loads(_get("https://checkpoint-api.hashicorp.com/v1/check/terraform"))[
             "current_version"]
-    archive_name = f"terraform_{version}_linux_{arch}.zip"
+    archive_name = f"terraform_{version}_{OS_NAME}_{arch}.zip"
 
     with ui.console.status(f"Téléchargement de Terraform {version}..."):
         archive = _get(f"{RELEASES}/{version}/{archive_name}")
@@ -60,14 +72,15 @@ PULUMI_ARCHS = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "a
 def install_pulumi():
     """Installe le CLI Pulumi dans ~/.pulumi/bin (emplacement officiel), sans sudo, et le
     rend accessible depuis ~/.local/bin."""
-    arch = PULUMI_ARCHS.get(platform.machine().lower())
-    if not arch:
-        ui.err(f"Architecture non prise en charge : {platform.machine()}")
+    problem = _unsupported()
+    if problem:
+        ui.err(problem)
         return 1
+    arch = PULUMI_ARCHS[platform.machine().lower()]
 
     with ui.console.status("Recherche de la dernière version de Pulumi..."):
         version = _get("https://www.pulumi.com/latest-version").decode().strip().lstrip("v")
-    archive_name = f"pulumi-v{version}-linux-{arch}.tar.gz"
+    archive_name = f"pulumi-v{version}-{OS_NAME}-{arch}.tar.gz"
 
     with ui.console.status(f"Téléchargement de Pulumi {version} (environ 100 Mo)..."):
         archive = _get(f"https://get.pulumi.com/releases/sdk/{archive_name}")
@@ -145,14 +158,15 @@ def _link(names, source_dir):
 
 def install_go():
     """Go est nécessaire pour les projets Pulumi (Go)."""
-    arch = ARCHS.get(platform.machine().lower())
-    if not arch:
-        ui.err(f"Architecture non prise en charge : {platform.machine()}")
+    problem = _unsupported()
+    if problem:
+        ui.err(problem)
         return 1
+    arch = ARCHS[platform.machine().lower()]
     with ui.console.status("Recherche de la dernière version de Go..."):
         release = next(r for r in json.loads(_get("https://go.dev/dl/?mode=json")) if r["stable"])
     archive = next(f for f in release["files"]
-                   if f["os"] == "linux" and f["arch"] == arch and f["kind"] == "archive")
+                   if f["os"] == OS_NAME and f["arch"] == arch and f["kind"] == "archive")
     data = _verified_download(f"https://go.dev/dl/{archive['filename']}", archive["sha256"],
                               f"{release['version']} (environ 70 Mo)")
     if data is None:
@@ -169,14 +183,15 @@ NODE_ARCHS = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm
 
 def install_node():
     """Node.js est nécessaire pour les projets Pulumi (JavaScript). Version LTS."""
-    arch = NODE_ARCHS.get(platform.machine().lower())
-    if not arch:
-        ui.err(f"Architecture non prise en charge : {platform.machine()}")
+    problem = _unsupported()
+    if problem:
+        ui.err(problem)
         return 1
+    arch = NODE_ARCHS[platform.machine().lower()]
     with ui.console.status("Recherche de la dernière version LTS de Node.js..."):
         release = next(r for r in json.loads(_get("https://nodejs.org/dist/index.json")) if r["lts"])
     version = release["version"]
-    filename = f"node-{version}-linux-{arch}.tar.gz"
+    filename = f"node-{version}-{OS_NAME}-{arch}.tar.gz"
     sums = _get(f"https://nodejs.org/dist/{version}/SHASUMS256.txt").decode()
     expected = next((line.split()[0] for line in sums.splitlines() if line.endswith(filename)), None)
     data = _verified_download(f"https://nodejs.org/dist/{version}/{filename}", expected,

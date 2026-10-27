@@ -1,10 +1,14 @@
 """`felcloud setup` : installer et vérifier ses identifiants."""
 
+import os
+import platform
+import shutil
+import subprocess
 from pathlib import Path
 
 from rich.table import Table
 
-from felcloud import cloud, config, credentials, ui
+from felcloud import cloud, config, credentials, projects, ui
 
 GUIDE = f"""
 [bold]Obtenir tes identifiants FelCloud (une seule fois)[/]
@@ -15,10 +19,13 @@ GUIDE = f"""
   4. Skyline affiche alors un [bold]ID[/] et un [bold]secret[/].
      [yellow]Le secret n'est affiché qu'une seule fois : copie-le tout de suite.[/]
 
-[bold]Ensuite, deux possibilités[/]
+[bold]Ensuite, au choix[/]
 
-  • Le plus simple : relance [bold]felcloud setup[/], choisis
-    « Saisir mon ID et mon secret », et colle les deux valeurs.
+  • Télécharge le fichier [bold]clouds.yaml[/] proposé par Skyline, puis relance
+    [bold]felcloud setup[/] : il le trouve dans tes Téléchargements et le range
+    à sa place, [bold]{credentials.CLOUDS_FILE}[/]
+  • Ou relance [bold]felcloud setup[/], choisis « Saisir mon ID et mon secret »,
+    et colle les deux valeurs.
   • Ou écris toi-même l'entrée dans [bold]{credentials.CLOUDS_FILE}[/] :
 
       clouds:
@@ -79,15 +86,64 @@ def run_check(name, offer_default=True):
     return True
 
 
+def _open_folder(folder):
+    """Ouvre le dossier dans l'explorateur de fichiers, si la machine en a un."""
+    opener = "open" if platform.system() == "Darwin" else "xdg-open"
+    if not shutil.which(opener) or (opener == "xdg-open" and not (
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))):
+        return False
+    subprocess.Popen([opener, str(folder)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
+def show_location():
+    """Indique où doit se trouver clouds.yaml, et crée le dossier s'il manque."""
+    credentials.CLOUDS_DIR.mkdir(parents=True, exist_ok=True)
+    ui.console.print(ui.Panel(
+        "Tous les outils (felcloud, Terraform, Pulumi, openstack) lisent tes identifiants ici :\n\n"
+        f"  [bold #2e86de]{credentials.CLOUDS_FILE}[/]\n\n"
+        "[dim]Le dossier .config est caché : dans l'explorateur de fichiers, Ctrl+H\n"
+        "(Linux) ou Cmd+Maj+. (macOS) affiche les dossiers cachés.[/]",
+        title="Emplacement de clouds.yaml", title_align="left", border_style="#2e86de", expand=False))
+
+
+def _drop_file_yourself():
+    """L'utilisateur dépose lui-même le fichier dans le dossier, qu'on lui ouvre."""
+    folder = credentials.CLOUDS_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    if _open_folder(folder):
+        ui.ok(f"Dossier ouvert : {folder}")
+    ui.info(f"Copie ton fichier [bold]clouds.yaml[/] dans [bold]{folder}[/]")
+    ui.hint(f"En ligne de commande : mv ~/Downloads/clouds.yaml {folder}/")
+    while not credentials.CLOUDS_FILE.exists():
+        if not ui.confirm("C'est fait ?", default=True):
+            return None
+        if not credentials.CLOUDS_FILE.exists():
+            ui.warn(f"Toujours rien dans {credentials.CLOUDS_FILE} : vérifie que le fichier "
+                    "s'appelle exactement clouds.yaml.")
+    try:
+        names = list(credentials.installed_clouds())
+    except credentials.CloudsFileError as exc:
+        ui.err(str(exc))
+        return None
+    credentials.protect()
+    ui.ok(f"Fichier trouvé ({', '.join(names)}) et protégé : lisible par toi seul (chmod 600)")
+    return names
+
+
 def _pick_file():
     found = credentials.find_downloaded_files()
+    choices = [ui.Choice(f"{p.name}   [{p.parent}]", value=str(p)) for p in found[:8]]
+    if not credentials.CLOUDS_FILE.exists():
+        choices.append(ui.Choice("Je le copie moi-même dans le bon dossier", value="drop"))
+    choices.append(ui.Choice("Indiquer où il se trouve...", value=""))
     if found:
-        choices = [ui.Choice(f"{p.name}   [{p.parent}]", value=str(p)) for p in found[:8]]
-        choices.append(ui.Choice("Autre emplacement...", value=""))
-        picked = ui.select("Quel fichier importer ? (le plus récent est en haut)", choices)
-        if picked:
-            return picked
-    return ui.path("Chemin du fichier clouds.yaml :", default=str(Path.home()) + "/")
+        message = "Quel fichier ranger à sa place ? (le plus récent est en haut)"
+    else:
+        ui.info("Aucun clouds.yaml dans tes Téléchargements.")
+        message = "Que faire ?"
+    picked = ui.select(message, choices)
+    return picked or ui.path("Chemin du fichier clouds.yaml :", default=str(Path.home()) + "/")
 
 
 def _resolve_conflict(name):
@@ -148,7 +204,12 @@ def import_file(path, resolve_conflict, rename=None):
         ui.ok(f"« {name} » ajouté dans {credentials.CLOUDS_FILE}")
     if added:
         ui.ok("Fichier protégé : lisible par toi seul (chmod 600)")
-        ui.hint(f"Pense à supprimer la copie {path}, qui contient ton secret en clair.")
+    source = Path(path).expanduser()
+    if (added or unchanged) and source.resolve() != credentials.CLOUDS_FILE.resolve():
+        if ui.confirm(f"Supprimer la copie {source} ? Elle contient ton secret en clair.",
+                      default=True):
+            source.unlink()
+            ui.ok("Copie supprimée.")
     return added or unchanged
 
 
@@ -178,14 +239,43 @@ def manual_entry():
     return added[0] if added else None
 
 
+def _valid_projects_dir(value):
+    path = Path(value.strip() or ".").expanduser()
+    if not value.strip():
+        return "Indique un dossier."
+    if projects.is_temporary(path):
+        return "Ce dossier est temporaire (effacé au redémarrage) : choisis-en un autre."
+    if path.exists() and not path.is_dir():
+        return "C'est un fichier, pas un dossier."
+    existing = next((p for p in [path, *path.parents] if p.exists()), None)
+    if existing is None or not os.access(existing, os.W_OK):
+        return "Tu n'as pas le droit d'écrire dans ce dossier."
+    return True
+
+
+def ask_projects_dir():
+    """Choix du dossier où seront créés tous les projets felcloud."""
+    ui.section("Dossier de tes projets")
+    ui.hint("Chaque projet felcloud y aura son propre sous-dossier. Garde-le : il contient "
+            "l'état de tes projets, indispensable pour les modifier ou les supprimer.")
+    current = str(config.projects_dir()).replace(str(Path.home()), "~", 1)
+    value = ui.path("Dossier des projets :", default=current, only_directories=True,
+                    validate=_valid_projects_dir)
+    folder = config.set_projects_dir(value.strip())
+    ui.ok(f"Tes projets seront créés dans [bold]{folder}[/]")
+    return folder
+
+
 def interactive():
-    ui.title("Configuration des identifiants",
-             f"Tous les outils lisent {credentials.CLOUDS_FILE}")
+    ui.title("Configuration de felcloud",
+             "1. tes identifiants (clouds.yaml)   2. le dossier de tes projets")
     try:
         clouds = show_installed()
     except credentials.CloudsFileError as exc:
         ui.err(f"Ton clouds.yaml actuel est illisible : {exc}")
         return
+    if not clouds:
+        show_location()
     if clouds and not credentials.is_protected():
         ui.warn("Ton clouds.yaml est lisible par d'autres utilisateurs de la machine.")
         if ui.confirm("Le protéger maintenant (chmod 600) ?"):
@@ -196,11 +286,14 @@ def interactive():
     if clouds:
         choices.append(ui.Choice("Tester un cloud déjà configuré et le choisir par défaut", value="check"))
     choices += [
+        ui.Choice("J'ai téléchargé clouds.yaml depuis Skyline : le ranger à sa place", value="import"),
         ui.Choice("Saisir mon ID et mon secret (copiés depuis Skyline)", value="manual"),
-        ui.Choice("Importer un fichier clouds.yaml", value="import"),
         ui.Choice("Comment obtenir mes identifiants ?", value="guide"),
-        ui.Choice("Retour", value="back"),
     ]
+    if config.projects_dir_chosen():
+        choices.append(ui.Choice(f"Changer le dossier de mes projets (actuel : {config.projects_dir()})",
+                                 value="folder"))
+    choices.append(ui.Choice("Retour", value="back"))
     action = ui.select("Que veux-tu faire ?", choices)
 
     if action == "guide":
@@ -210,7 +303,8 @@ def interactive():
         if name:
             run_check(name)
     elif action == "import":
-        names = import_file(_pick_file(), _resolve_conflict)
+        picked = _pick_file()
+        names = _drop_file_yourself() if picked == "drop" else import_file(picked, _resolve_conflict)
         if names:
             target = names[0] if len(names) == 1 else ui.select("Quel cloud tester ?", names)
             run_check(target)
@@ -219,10 +313,24 @@ def interactive():
         target = ui.select("Quel cloud tester ?", list(clouds),
                            default=default if default in clouds else None)
         run_check(target)
+    elif action == "folder":
+        ask_projects_dir()
+        return
+
+    if action != "back" and not config.projects_dir_chosen():
+        ask_projects_dir()
 
 
-def non_interactive(import_path=None, as_name=None, check_name=None):
+def non_interactive(import_path=None, as_name=None, check_name=None, projects_dir=None):
     """Variante sans menus, pour les scripts et les tests."""
+    if projects_dir:
+        problem = _valid_projects_dir(projects_dir)
+        if problem is not True:
+            ui.err(problem)
+            return 1
+        ui.ok(f"Tes projets seront créés dans {config.set_projects_dir(projects_dir)}")
+        if not (import_path or check_name):
+            return 0
     if import_path:
         def resolve(name):
             ui.err(f"« {name} » existe déjà avec d'autres identifiants : choisis un autre nom avec --as.")

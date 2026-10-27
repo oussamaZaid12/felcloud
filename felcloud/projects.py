@@ -11,7 +11,9 @@ from rich.table import Table
 
 from felcloud import config, doctor, ui
 
-TEMP_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
+# Linux, puis macOS (où /tmp pointe vers /private/tmp et le dossier temporaire
+# de l'utilisateur est sous /private/var/folders).
+TEMP_ROOTS = ("/tmp", "/var/tmp", "/dev/shm", "/private/tmp", "/private/var/tmp", "/private/var/folders")
 
 
 @dataclass
@@ -61,10 +63,11 @@ def is_temporary(path):
 
 
 def all_projects():
-    """Projets de ~/felcloud-projets + ceux créés ailleurs et mémorisés."""
+    """Projets du dossier des projets + ceux créés ailleurs et mémorisés."""
     candidates = []
-    if config.PROJECTS_DIR.is_dir():
-        candidates += sorted(p for p in config.PROJECTS_DIR.iterdir() if p.is_dir())
+    folder = config.projects_dir()
+    if folder.is_dir():
+        candidates += sorted(p for p in folder.iterdir() if p.is_dir())
     candidates += config.known_projects()
     found, seen = [], set()
     for path in candidates:
@@ -98,7 +101,7 @@ def show_list():
     projects = all_projects()
     if not projects:
         ui.info("Aucun projet trouvé. Crée le premier avec : felcloud new")
-        ui.hint(f"Les projets sont rangés dans {config.PROJECTS_DIR}")
+        ui.hint(f"Les projets sont rangés dans {config.projects_dir()}")
         return 0
     table = Table(title="Mes projets felcloud", title_justify="left")
     for col in ("Projet", "Outil", "Cloud", "État", "Dossier"):

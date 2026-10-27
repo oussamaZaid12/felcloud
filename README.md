@@ -10,41 +10,46 @@ vérifie que les machines répondent, puis supprime tout proprement quand tu as 
 
 ## 1. Installer (une seule fois)
 
-Il te faut Linux, Python 3.10+ et Git.
+Fonctionne sous **Linux** (Ubuntu, Debian, Fedora, Arch...) et **macOS**. Copie cette ligne dans un terminal :
 
 ```bash
-git clone <URL-du-dépôt> FelcloudGuide
-cd FelcloudGuide
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/oussamaZaid12/felcloud/main/install.sh | bash
 ```
 
-Si `felcloud` n'est pas trouvé ensuite, lance `fish_add_path ~/.local/bin` (fish)
-ou `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc` (bash), puis ouvre un nouveau terminal.
+Pas besoin de sudo ni de Python : si la machine n'a pas de Python récent, felcloud télécharge le sien.
+À la fin, felcloud enchaîne directement sur la configuration (étape 2).
+**Ouvre ensuite un nouveau terminal** pour que la commande `felcloud` soit reconnue.
 
-## 2. Ajouter tes identifiants (une seule fois)
+## 2. Configurer (une seule fois)
 
-**Dans Skyline** : Menu → **User Center** → **Application Credentials** → crée un identifiant.
-Le secret n'est affiché qu'une seule fois : choisis tout de suite **l'une** des deux méthodes ci-dessous.
+Lance `felcloud setup` (déjà lancé automatiquement par l'installation). Il te demande deux choses.
 
-**Méthode A — télécharger le fichier `clouds.yaml`** proposé par Skyline, puis le mettre à sa place :
+### a. Tes identifiants : le fichier `clouds.yaml`
 
-```bash
-mkdir -p ~/.config/openstack
-mv ~/Téléchargements/clouds.yaml ~/.config/openstack/clouds.yaml    # ou ~/Downloads/clouds.yaml
-chmod 600 ~/.config/openstack/clouds.yaml                             # lisible par toi seul
-felcloud setup      # choisis « Tester un cloud déjà configuré »
-```
+**Dans Skyline** : Menu → **User Center** → **Application Credentials** → crée un identifiant,
+puis **télécharge le fichier `clouds.yaml`** (le secret n'est affiché qu'une seule fois).
 
-> ⚠️ Si tu as **déjà** un fichier `~/.config/openstack/clouds.yaml`, ne l'écrase pas avec `mv` :
-> utilise plutôt `felcloud setup` → « Importer un fichier clouds.yaml », qui **ajoute** le nouveau cloud sans effacer les autres.
+Ce fichier doit être rangé exactement ici :
 
-**Méthode B — copier l'ID et le secret** affichés par Skyline :
+| Système | Emplacement |
+|---|---|
+| Linux | `/home/<ton-nom>/.config/openstack/clouds.yaml` |
+| macOS | `/Users/<ton-nom>/.config/openstack/clouds.yaml` |
 
-```bash
-felcloud setup      # choisis « Saisir mon ID et mon secret » et colle-les
-```
+Le plus simple : dans `felcloud setup`, choisis **« J'ai téléchargé clouds.yaml depuis Skyline »**.
+felcloud le trouve dans tes Téléchargements, le range à cet endroit, le protège (lisible par toi seul),
+supprime la copie téléchargée et teste la connexion.
+Réponds **Oui** à « Utiliser comme cloud par défaut ».
 
-Dans les deux cas, felcloud teste la connexion. Réponds **Oui** à « Utiliser comme cloud par défaut », puis vérifie que tout est prêt :
+> Tu peux aussi choisir « Saisir mon ID et mon secret » et coller les deux valeurs affichées par Skyline.
+
+### b. Le dossier de tes projets
+
+felcloud te demande où ranger tes projets (par défaut `~/felcloud-projets`).
+Choisis un dossier que tu gardes : **tous** tes projets y seront créés, chacun dans son sous-dossier.
+Pour le changer plus tard : `felcloud setup` → « Changer le dossier de mes projets ».
+
+### c. Vérifier
 
 ```bash
 felcloud doctor
@@ -81,14 +86,14 @@ En cas de doute, garde la réponse proposée. Les bons choix :
 ✓ Toutes les machines répondent en SSH.
 ```
 
-Ton projet est rangé dans `~/felcloud-projets/<nom>/`.
+Ton projet est rangé dans `<dossier-des-projets>/<nom>/` : felcloud affiche la commande `cd` exacte.
 
 ## 4. Te connecter à tes machines
 
 **Projet Terraform :**
 
 ```bash
-cd ~/felcloud-projets/<nom>
+cd <dossier-des-projets>/<nom>
 terraform output ssh                # commande pour le bastion
 terraform output ssh_via_rebond     # commandes pour les autres machines
 ```
@@ -96,8 +101,8 @@ terraform output ssh_via_rebond     # commandes pour les autres machines
 **Projet Pulumi :**
 
 ```bash
-cd ~/felcloud-projets/<nom>
-set -x PULUMI_CONFIG_PASSPHRASE ""        # fish   (bash : export PULUMI_CONFIG_PASSPHRASE="")
+cd <dossier-des-projets>/<nom>
+export PULUMI_CONFIG_PASSPHRASE=""        # bash/zsh   (fish : set -x PULUMI_CONFIG_PASSPHRASE "")
 pulumi stack output ssh --json
 pulumi stack output ssh_via_rebond --json
 ```
@@ -124,17 +129,19 @@ Supprime tout sur FelCloud, puis le dossier du projet, puis sa clé SSH.
 | tout supprimer | `felcloud destroy <nom>` |
 | tester mes identifiants | `felcloud check` |
 | vérifier ma machine | `felcloud doctor` |
+| changer le dossier des projets | `felcloud setup` |
+| désinstaller felcloud | `curl -fsSL https://raw.githubusercontent.com/oussamaZaid12/felcloud/main/install.sh \| bash -s -- --uninstall` |
 | tout faire par menus | `felcloud` |
 
 ## Problèmes fréquents
 
 | Message | Solution |
 |---|---|
-| `felcloud: command not found` | Ajoute `~/.local/bin` au PATH (voir étape 1) |
+| `felcloud: command not found` | Ouvre un nouveau terminal (l'installation a ajouté `~/.local/bin` au PATH) |
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | `ssh-keygen -R <IP>` puis reconnecte-toi (FelCloud réutilise les IP) |
 | `Connection timed out` juste après la création | Attends 2 minutes : la machine démarre encore |
-| `No configuration files` (Terraform) | Lance la commande **dans** le dossier du projet (`cd ~/felcloud-projets/<nom>`) |
-| `passphrase must be set` (Pulumi) | Tape `set -x PULUMI_CONFIG_PASSPHRASE ""` dans ce terminal |
+| `No configuration files` (Terraform) | Lance la commande **dans** le dossier du projet (`cd <dossier-des-projets>/<nom>`) |
+| `passphrase must be set` (Pulumi) | Tape `export PULUMI_CONFIG_PASSPHRASE=""` dans ce terminal (fish : `set -x PULUMI_CONFIG_PASSPHRASE ""`) |
 | `apt` échoue sur une machine sans IP publique | Recrée le projet avec le bastion et le proxy (étape 3) |
 
 ## À savoir
@@ -142,6 +149,14 @@ Supprime tout sur FelCloud, puis le dossier du projet, puis sa clé SSH.
 - **Ne crée pas tes projets dans `/tmp`** : il s'efface au redémarrage, et felcloud ne pourrait plus supprimer tes machines.
 - **Supprime toujours avec `felcloud destroy`** : supprimer le dossier à la main laisse les machines tourner sur FelCloud.
 - **Ne partage jamais** `~/.config/openstack/clouds.yaml` : il contient ton secret.
+
+## Pour contribuer
+
+```bash
+git clone https://github.com/oussamaZaid12/felcloud.git
+cd felcloud
+./install.sh --dev      # le code du dépôt est utilisé directement
+```
 
 ---
 

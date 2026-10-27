@@ -11,8 +11,8 @@ from felcloud import __version__, config, credentials, doctor, installer, projec
 
 EPILOG = """exemples :
   felcloud                     menu principal
-  felcloud setup               installer ses identifiants (clouds.yaml)
-  felcloud new                 créer un projet (rangé dans ~/felcloud-projets/)
+  felcloud setup               identifiants (clouds.yaml) et dossier des projets
+  felcloud new                 créer un projet (dans le dossier des projets)
   felcloud projets             lister mes projets
   felcloud test PROJET         vérifier que les machines répondent en SSH
   felcloud destroy PROJET      tout supprimer : cloud, dossier, clé
@@ -27,7 +27,7 @@ def main_menu():
             ui.Choice("Créer un nouveau projet", value="new"),
             ui.Choice("Voir mes projets", value="list"),
             ui.Choice("Supprimer un projet", value="destroy"),
-            ui.Choice("Configurer mes identifiants (clouds.yaml)", value="setup"),
+            ui.Choice("Configurer : identifiants (clouds.yaml), dossier des projets", value="setup"),
             ui.Choice("Vérifier que ma machine est prête", value="doctor"),
             ui.Choice("Quitter", value="quit"),
         ])
@@ -56,14 +56,16 @@ def cmd_new(args):
         answers = yaml.safe_load(Path(args.answers).read_text())
         interactive = False
     else:
+        if not args.output and not config.projects_dir_chosen():
+            setup_cmd.ask_projects_dir()
         answers = wizard.run()
         interactive = True
-    dest = Path(args.output).expanduser() if args.output else config.PROJECTS_DIR / answers["project"]
+    dest = Path(args.output).expanduser() if args.output else config.projects_dir() / answers["project"]
     if projects.is_temporary(dest):
         ui.warn(f"{dest} est un dossier TEMPORAIRE, effacé au redémarrage. Avec lui disparaîtrait "
                 "l'état du projet, et l'outil ne saurait plus quoi supprimer sur le cloud.")
         if interactive and not ui.confirm("Créer le projet ici quand même ?", default=False):
-            dest = config.PROJECTS_DIR / answers["project"]
+            dest = config.projects_dir() / answers["project"]
 
     try:
         written = generator.generate(answers, dest)
@@ -171,11 +173,13 @@ def build_parser():
     parser.add_argument("--version", action="version", version=f"felcloud {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="COMMANDE")
 
-    p_setup = sub.add_parser("setup", help="installer et vérifier ses identifiants")
+    p_setup = sub.add_parser("setup", help="identifiants (clouds.yaml) et dossier des projets")
     p_setup.add_argument("--import", dest="import_path", metavar="FICHIER",
                          help="importer ce clouds.yaml sans passer par les menus")
     p_setup.add_argument("--as", dest="as_name", metavar="NOM",
                          help="nom sous lequel enregistrer le cloud importé")
+    p_setup.add_argument("--projects-dir", metavar="DOSSIER",
+                         help="dossier où créer tous les projets felcloud")
 
     p_check = sub.add_parser("check", help="tester la connexion à un cloud")
     p_check.add_argument("cloud", nargs="?", help="nom du cloud (défaut : cloud par défaut)")
@@ -184,7 +188,7 @@ def build_parser():
     p_new.add_argument("--answers", metavar="FICHIER",
                        help="regénérer à partir d'un felcloud.yaml existant, sans les questions")
     p_new.add_argument("--output", metavar="DOSSIER",
-                       help="dossier de destination (défaut : ~/felcloud-projets/NOM)")
+                       help="dossier de destination (défaut : DOSSIER-DES-PROJETS/NOM)")
     p_new.add_argument("--no-preview", action="store_true", help="ne pas proposer l'aperçu à la fin")
 
     sub.add_parser("projets", aliases=["projects", "list"], help="lister mes projets")
@@ -205,8 +209,9 @@ def dispatch(args):
     if args.command is None:
         return main_menu()
     if args.command == "setup":
-        if args.import_path:
-            return setup_cmd.non_interactive(import_path=args.import_path, as_name=args.as_name)
+        if args.import_path or args.projects_dir:
+            return setup_cmd.non_interactive(import_path=args.import_path, as_name=args.as_name,
+                                             projects_dir=args.projects_dir)
         setup_cmd.interactive()
         return 0
     if args.command == "check":

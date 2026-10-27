@@ -59,8 +59,9 @@ def password(message, validate=None):
     return _ask(questionary.password(message, style=STYLE, validate=validate or (lambda _: True)))
 
 
-def path(message, default=""):
-    return _ask(questionary.path(message, default=default, style=STYLE))
+def path(message, default="", only_directories=False, validate=None):
+    return _ask(questionary.path(message, default=default, only_directories=only_directories,
+                                 validate=validate, style=STYLE))
 
 
 def title(text_, subtitle=None):
