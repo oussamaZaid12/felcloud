@@ -1,0 +1,17 @@
+# Identifiants : ne jamais versionner
+clouds.yaml
+clouds*.yaml
+secure.yaml
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Projets générés pendant les essais
+/sandbox/

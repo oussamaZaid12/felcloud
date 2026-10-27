@@ -1,0 +1,24 @@
+#cloud-config
+# Script exécuté une seule fois, au premier démarrage de la machine (cloud-init).
+#
+# Sur FelCloud, seule une machine avec une IP publique accède à Internet. Celle-ci
+# sert donc de « bastion » : elle fait tourner un proxy (Squid, port 3128) que les
+# machines sans IP publique utilisent pour installer leurs paquets.
+
+write_files:
+{% include "common/_apt-fiable.j2" %}
+  # Configuration du proxy, écrite AVANT son installation : Squid démarre
+  # directement avec elle, sans redémarrage qui couperait les autres machines.
+  - path: /etc/squid/conf.d/felcloud.conf
+    content: |
+      # Seuls les réseaux privés peuvent utiliser ce proxy. En plus, le pare-feu
+      # OpenStack bloque le port 3128 depuis Internet.
+      acl reseau_prive src 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+      http_access allow reseau_prive
+
+runcmd:
+  - /usr/local/sbin/apt-fiable squid{{ " nginx" if bastion_nginx }}
+{% if bastion_nginx %}
+  - echo "<h1>Bonjour depuis $(hostname)</h1><p>Machine créée avec felcloud ({{ a.project }}).</p>" > /var/www/html/index.html
+  - systemctl enable --now nginx
+{% endif %}

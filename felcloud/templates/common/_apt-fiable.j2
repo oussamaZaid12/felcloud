@@ -1,0 +1,22 @@
+  # apt-fiable : installe des paquets en résistant aux coupures réseau. Si un
+  # téléchargement reste bloqué (connexion morte), apt est arrêté au bout du délai
+  # maximal et l'installation recommence, jusqu'à 5 fois.
+  - path: /usr/local/sbin/apt-fiable
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      export DEBIAN_FRONTEND=noninteractive
+      for essai in 1 2 3 4 5; do
+        dpkg --configure -a
+        if timeout 300 apt-get update -q && timeout 900 apt-get install -y -q "$@"; then
+          exit 0
+        fi
+        echo "apt-fiable : essai $essai échoué, nouvel essai dans 20 secondes" >&2
+        sleep 20
+      done
+      exit 1
+  - path: /etc/apt/apt.conf.d/90felcloud-reseau
+    content: |
+      Acquire::http::Timeout "30";
+      Acquire::https::Timeout "30";
+      Acquire::Retries "5";

@@ -1,0 +1,16 @@
+# Description du projet Pulumi.
+name: {{ a.project }}
+description: Infrastructure OpenStack générée par felcloud
+
+# Programme en JavaScript (Node.js). `pulumi install` installe les bibliothèques
+# listées dans package.json dans le dossier node_modules/.
+runtime:
+  name: nodejs
+  options:
+    packagemanager: npm
+    typescript: false
+
+# L'état (l'inventaire de ce qui a été créé) est rangé dans ce dossier, dans
+# .pulumi-state/ : pas besoin de compte Pulumi. Ne supprime pas ce dossier.
+backend:
+  url: file://.pulumi-state

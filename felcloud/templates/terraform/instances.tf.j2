@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# Les machines du projet. Pour en ajouter une, copie une ligne et change le nom.
+# ---------------------------------------------------------------------------
+#   floating_ip : true = adresse publique. Sur FelCloud, c'est aussi la seule façon
+#                 d'accéder directement à Internet.
+#   cloud_init  : script exécuté au premier démarrage ("" = aucun).
+locals {
+  instances = {
+{% for vm in a.instances %}
+    {{ vm.name | tojson }} = { image = {{ vm.image | tojson }}, flavor = {{ vm.flavor | tojson }}, floating_ip = {{ vm.floating_ip | lower }}, cloud_init = {{ cloud_init[vm.name] | tojson }}, ssh_user = {{ vm.ssh_user | tojson }} }
+{% endfor %}
+  }
+{% if proxy %}
+
+  # Adresse privée du bastion {{ proxy.bastion }}, dont le proxy (port 3128) donne
+  # Internet aux machines sans IP publique. Injectée dans leur cloud-init.
+  proxy_address = openstack_networking_port_v2.vm[{{ proxy.bastion | tojson }}].all_fixed_ips[0]
+{% endif %}
+}
+
+# Carte réseau de chaque machine, créée explicitement : c'est sur elle qu'on
+# rattache le pare-feu et, si besoin, l'adresse IP publique.
+resource "openstack_networking_port_v2" "vm" {
+  for_each = local.instances
+
+  name           = "${each.key}-port"
+  network_id     = {{ net_id_ref }}
+  admin_state_up = true
+{% if sg %}
+  security_group_ids = [openstack_networking_secgroup_v2.main.id]
+{% endif %}
+{% if a.network.mode == "create" %}
+
+  fixed_ip {
+    subnet_id = openstack_networking_subnet_v2.main.id
+  }
+{% endif %}
+}
+
+resource "openstack_compute_instance_v2" "vm" {
+  for_each = local.instances
+
+  name        = each.key
+  image_name  = each.value.image
+  flavor_name = each.value.flavor
+{% if keypair_ref %}
+  key_pair    = {{ keypair_ref }}
+{% endif %}
+  # Les métadonnées (clé SSH, script de démarrage) sont fournies sur un petit
+  # disque attaché à la machine, plutôt que par le service réseau d'OpenStack :
+  # plus fiable, notamment quand une machine est recréée sur la même carte réseau.
+  config_drive = true
+{% if roles_used %}
+  user_data = each.value.cloud_init == "" ? null : templatefile("${path.module}/${each.value.cloud_init}", { proxy = {{ "local.proxy_address" if proxy else '""' }} })
+{% endif %}
+
+  network {
+    port = openstack_networking_port_v2.vm[each.key].id
+  }
+{% if a.network.mode == "create" %}
+
+  # Le réseau doit être entièrement branché avant le démarrage, pour que la
+  # machine obtienne son adresse et que son IP publique soit utilisable.
+  depends_on = [openstack_networking_router_interface_v2.main]
+{% endif %}
+}
+{% if any_fip %}
+
+# Adresses IP publiques, pour les machines marquées floating_ip = true.
+# subnet_id est précisé en plus du pool : sur FelCloud, une allocation par le
+# seul nom du réseau peut échouer avec « ExternalIpAddressExhausted ».
+resource "openstack_networking_floatingip_v2" "vm" {
+  for_each = { for name, vm in local.instances : name => vm if vm.floating_ip }
+
+  pool      = data.openstack_networking_network_v2.external.name
+  subnet_id = data.openstack_networking_network_v2.external.subnets[0]
+  port_id   = openstack_networking_port_v2.vm[each.key].id
+{% if a.network.mode == "create" %}
+
+  depends_on = [openstack_networking_router_interface_v2.main]
+{% endif %}
+}
+{% endif %}

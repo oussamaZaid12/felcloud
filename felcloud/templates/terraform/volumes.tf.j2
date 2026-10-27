@@ -1,0 +1,30 @@
+# ---------------------------------------------------------------------------
+# Volumes : des disques supplémentaires, indépendants des machines.
+# Ils survivent à la suppression d'une machine (mais pas à `terraform destroy`).
+# ---------------------------------------------------------------------------
+locals {
+  volumes = {
+{% for vol in a.volumes %}
+    {{ vol.name | tojson }} = { size_gb = {{ vol.size }}, type = {{ (vol.type or none) | tojson }}, attach_to = {{ (vol.attach_to or none) | tojson }} }
+{% endfor %}
+  }
+}
+
+resource "openstack_blockstorage_volume_v3" "data" {
+  for_each = local.volumes
+
+  name        = each.key
+  size        = each.value.size_gb
+  volume_type = each.value.type
+}
+{% if any_attached %}
+
+# Branchement des volumes sur les machines. Dans la machine, le disque apparaît
+# comme /dev/vdb (puis vdc...) : il faut encore le formater et le monter.
+resource "openstack_compute_volume_attach_v2" "data" {
+  for_each = { for name, vol in local.volumes : name => vol if vol.attach_to != null }
+
+  instance_id = openstack_compute_instance_v2.vm[each.value.attach_to].id
+  volume_id   = openstack_blockstorage_volume_v3.data[each.key].id
+}
+{% endif %}

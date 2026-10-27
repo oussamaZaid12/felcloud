@@ -1,0 +1,247 @@
+{% set tf = a.tool == "terraform" %}
+{% set lang = a.tool.replace("pulumi-", "") %}
+{% set list_name = {"python": "INSTANCES", "javascript": "INSTANCES", "go": "machines"}.get(lang, "") %}
+# {{ a.project }}
+
+Projet {{ tool_label }} généré par **felcloud** le {{ generated_on }}, pour le cloud `{{ a.cloud }}`.
+
+## Ce que ce projet crée
+
+| Ressource | Détail |
+|---|---|
+{% if a.network %}
+{% if a.network.mode == "create" %}
+| Réseau privé | `{{ a.project }}-net`, plage `{{ a.network.cidr }}` |
+| Routeur | `{{ a.project }}-router`, sortie Internet via `{{ a.network.external_network }}` |
+{% else %}
+| Réseau | réseau existant `{{ a.network.name }}` (lu, jamais supprimé) |
+{% endif %}
+{% endif %}
+{% if a.security_group %}
+| Pare-feu | `{{ a.project }}-sg` : {{ sg_summary }} |
+{% endif %}
+{% if a.keypair and a.keypair.mode != "existing" %}
+| Clé SSH | `{{ a.keypair.name }}` (clé privée : `{{ a.keypair.private_key_path }}`) |
+{% endif %}
+{% for vm in a.instances or [] %}
+| Machine | `{{ vm.name }}` · {{ vm.flavor }} · {{ vm.image }}{{ " · IP publique" if vm.floating_ip }}{{ " · nginx" if vm.nginx }} |
+{% endfor %}
+{% for vol in a.volumes or [] %}
+| Volume | `{{ vol.name }}` · {{ vol.size }} Go{{ " " ~ vol.type if vol.type }}{{ " · attaché à `" ~ vol.attach_to ~ "`" if vol.attach_to }} |
+{% endfor %}
+
+## Les fichiers
+
+| Fichier | Contenu |
+|---|---|
+{% if tf %}
+| `versions.tf` | version de Terraform et du provider OpenStack |
+| `provider.tf` | connexion au cloud (via `~/.config/openstack/clouds.yaml`, aucun secret ici) |
+{% if a.network %}
+| `network.tf` | réseau, sous-réseau, routeur |
+{% endif %}
+{% if a.security_group %}
+| `security.tf` | pare-feu et ses règles |
+{% endif %}
+{% if a.keypair and a.keypair.mode != "existing" %}
+| `keypair.tf` | import de ta clé SSH publique |
+{% endif %}
+{% if a.instances %}
+| `instances.tf` | machines, cartes réseau, IP publiques — **la liste des machines est en haut du fichier** |
+{% endif %}
+{% if a.volumes %}
+| `volumes.tf` | volumes et leur branchement |
+{% endif %}
+| `outputs.tf` | informations affichées après la création |
+{% else %}
+| `{{ main_file }}` | **le programme** : réseau, pare-feu, clé, machines, volumes, sorties. La liste des machines est dans `{{ list_name }}` |
+| `Pulumi.yaml` | description du projet ; l'état est rangé dans `.pulumi-state/` |
+{% if lang == "python" %}
+| `requirements.txt` | bibliothèques Python nécessaires (`pulumi`, `pulumi-openstack`) |
+{% elif lang == "javascript" %}
+| `package.json` | bibliothèques JavaScript nécessaires (`@pulumi/pulumi`, `@pulumi/openstack`) |
+{% else %}
+| `go.mod` | bibliothèques Go nécessaires ; `go.sum` (créé par `go mod tidy`) fige leurs versions |
+{% endif %}
+| `.pulumi-state/` | **l'état** : l'inventaire de ce qui a été créé (ne pas supprimer) |
+{% if lang == "python" %}
+| `venv/` | environnement Python, créé par `pulumi install` |
+{% elif lang == "javascript" %}
+| `node_modules/` | bibliothèques téléchargées par `pulumi install` |
+{% endif %}
+{% endif %}
+{% if "bastion" in roles_used %}
+| `cloud-init-bastion.yaml` | premier démarrage du bastion : proxy Squid{{ " et nginx" if bastion_nginx }} |
+{% endif %}
+{% if "public" in roles_used %}
+| `cloud-init-public.yaml` | premier démarrage des machines publiques : nginx |
+{% endif %}
+{% if "private" in roles_used %}
+| `cloud-init-private.yaml` | premier démarrage des machines privées : utilisation du proxy{{ ", nginx" if private_nginx }} |
+{% endif %}
+| `felcloud.yaml` | tes réponses à l'assistant (pour regénérer le projet) |
+
+## Utilisation
+
+Toutes les commandes se lancent **dans ce dossier**.
+
+{% if tf %}
+```bash
+terraform init      # une seule fois : télécharge le provider OpenStack
+terraform plan      # aperçu : ce qui VA être créé, sans rien toucher
+terraform apply     # création réelle (demande de taper « yes »)
+terraform output    # réafficher les adresses IP
+terraform destroy   # tout supprimer
+```
+
+`terraform plan` est la commande la plus importante : lis toujours son résultat avant un `apply`. La dernière ligne résume tout, par exemple `Plan: 12 to add, 0 to change, 0 to destroy.`
+{% else %}
+**Une fois par terminal**, indique à Pulumi qu'il n'y a pas de phrase de passe (ce projet ne stocke aucun secret) :
+
+```bash
+set -x PULUMI_CONFIG_PASSPHRASE ""        # fish
+export PULUMI_CONFIG_PASSPHRASE=""        # bash / zsh
+```
+
+Puis :
+
+```bash
+{% if lang == "go" %}
+go mod tidy               # une seule fois : télécharge les bibliothèques Go
+{% endif %}
+pulumi install            # une seule fois : {{ {"python": "crée venv/ et installe les bibliothèques", "javascript": "installe les bibliothèques (node_modules/)", "go": "prépare le programme Go"}[lang] }}
+pulumi stack select --create dev   # une seule fois : crée l'environnement « dev »
+pulumi preview            # aperçu : ce qui VA être créé, sans rien toucher
+pulumi up                 # création réelle (choisis « yes »)
+pulumi stack output       # réafficher les adresses IP
+pulumi destroy            # tout supprimer
+```
+
+`pulumi preview` est la commande la plus importante : lis toujours son résultat avant un `up`. Le résumé final indique par exemple `+ 12 to create`.
+{% endif %}
+{% if a.instances %}
+
+## Se connecter aux machines
+
+> ⏳ Une machine apparaît « ACTIVE » avant d'avoir fini de démarrer. Compte **1 à 2 minutes** avant que SSH réponde. Avant, la connexion échoue par un délai d'attente : c'est normal.
+
+{% if any_fip %}
+```bash
+{{ "terraform output ssh" if tf else "pulumi stack output ssh --json" }}
+```
+
+affiche la commande de connexion de chaque machine publique, du type :
+
+```bash
+ssh -i {{ private_key or "<ta-clé-privée>" }} {{ jump.ssh_user or "<utilisateur>" }}@<IP_PUBLIQUE>
+```
+{% if has_private_vms %}
+
+{% if dedicated_bastion %}
+`{{ jump.name }}` est le **bastion** du projet : une petite machine dont le seul rôle est d'être la porte d'entrée depuis Internet{{ " et le proxy des autres machines" if proxy and proxy.bastion == jump.name }}. Tes machines de travail restent privées, ce qui réduit ce qui est exposé sur Internet.
+
+{% endif %}
+Les machines **sans IP publique** ne sont joignables que depuis le réseau privé. On passe par `{{ jump.name }}`, qui sert de « rebond » :
+
+```bash
+{{ "terraform output ssh_via_rebond" if tf else "pulumi stack output ssh_via_rebond --json" }}
+```
+
+donne la commande complète de chaque machine privée, du type :
+
+```bash
+ssh -i {{ private_key or "<ta-clé-privée>" }} -o ProxyCommand='ssh -i {{ private_key or "<ta-clé-privée>" }} -W %h:%p {{ jump.ssh_user }}@<IP_PUBLIQUE>' {{ (a.instances | rejectattr("floating_ip") | first).ssh_user }}@<IP_PRIVEE>
+```
+
+(L'option plus courte `-J` ne fonctionne que si ta clé est chargée dans `ssh-agent`, car `-i` ne s'applique pas à la machine de rebond.)
+{% endif %}
+{% else %}
+Aucune machine n'a d'IP publique : elles ne sont joignables que depuis le réseau privé du projet.
+{% endif %}
+
+**« REMOTE HOST IDENTIFICATION HAS CHANGED »** : normal, FelCloud réutilise les IP publiques ; ton PC se souvient de l'ancienne machine qui avait cette IP. felcloud efface ces anciennes empreintes après chaque création, mais si le message apparaît quand même : 
+```bash
+ssh-keygen -R <IP_PUBLIQUE>
+```
+{% endif %}
+{% if a.instances %}
+
+## Accès à Internet depuis les machines
+
+Sur FelCloud, **seule une machine qui a une IP publique accède à Internet**. Le routeur du projet sert à rattacher les IP publiques ; il ne donne pas Internet aux autres machines.
+
+| Machine | Accès à Internet |
+|---|---|
+{% for vm in a.instances %}
+| `{{ vm.name }}` | {% if proxy and vm.name == proxy.bastion %}direct (IP publique) — sert aussi de proxy aux autres{% elif vm.floating_ip %}direct (IP publique){% elif proxy %}via le proxy de `{{ proxy.bastion }}`{% else %}aucun{% endif %} |
+{% endfor %}
+{% if proxy %}
+
+Le proxy (Squid, port 3128) est installé automatiquement sur `{{ proxy.bastion }}`, et les machines sans IP publique sont configurées pour l'utiliser : `apt` fonctionne directement, et `curl`, `pip` ou `git` après reconnexion. À la main, dans une session :
+
+```bash
+export http_proxy=http://<IP_PRIVEE_DE_{{ proxy.bastion | upper | replace("-", "_") }}>:3128 https_proxy=$http_proxy
+```
+{% endif %}
+{% endif %}
+{% if any_nginx %}
+
+## Le site web
+
+nginx s'installe automatiquement au premier démarrage (compte 2 à 3 minutes). Ouvre ensuite `http://<IP_PUBLIQUE>` dans un navigateur.
+{% if not (a.security_group and "http" in a.security_group.rules) %}
+
+⚠️ Le port 80 n'est pas ouvert dans le pare-feu : le site ne sera pas joignable depuis Internet. Ajoute la règle HTTP dans {{ "`security.tf`" if tf else "`" ~ main_file ~ "`" }}.
+{% endif %}
+{% endif %}
+{% if a.volumes %}
+
+## Utiliser un volume
+
+Un volume attaché apparaît comme un disque vide (`/dev/vdb`, puis `/dev/vdc`...). À la **première** utilisation seulement, formate-le puis monte-le :
+
+```bash
+lsblk                                   # repérer le disque (ex. vdb)
+sudo mkfs.ext4 /dev/vdb                 # formater — EFFACE le contenu, à ne faire qu'une fois
+sudo mkdir -p /data
+sudo mount /dev/vdb /data
+```
+{% endif %}
+
+## Modifier le projet
+
+{% if tf %}
+Change les valeurs dans les fichiers `.tf` (par exemple ajoute une ligne dans `locals.instances` de `instances.tf`), puis :
+
+```bash
+terraform plan      # vérifie ce qui va changer
+terraform apply
+```
+
+Terraform ne touche qu'à ce qui a changé.
+{% else %}
+Modifie `{{ main_file }}` (par exemple ajoute une ligne dans `{{ list_name }}`), puis :
+
+```bash
+pulumi preview      # vérifie ce qui va changer
+pulumi up
+```
+
+Pulumi ne touche qu'à ce qui a changé.
+{% endif %}
+
+## Bonnes pratiques
+
+{% if tf %}
+- Ne supprime pas le fichier `terraform.tfstate` : c'est l'inventaire de ce qui a été créé. Sans lui, Terraform ne sait plus quoi détruire.
+{% if a.keypair and a.keypair.mode != "existing" %}
+- Ne supprime pas `{{ a.keypair.public_key_path }}` avant `terraform destroy` : Terraform relit ce fichier à chaque commande, destruction comprise.
+{% endif %}
+- Si une commande s'arrête sur `OpenStack connection error` ou `EOF`, c'est une coupure passagère de l'API : relance simplement la même commande, Terraform reprend là où il s'était arrêté.
+{% else %}
+- Ne supprime pas le dossier `.pulumi-state/` : c'est l'inventaire de ce qui a été créé. Sans lui, Pulumi ne sait plus quoi détruire.
+- `passphrase must be set` : tu as oublié la ligne `PULUMI_CONFIG_PASSPHRASE` dans ce terminal.
+- Si une commande s'arrête sur une erreur de connexion à l'API, c'est une coupure passagère : relance la même commande.
+{% endif %}
+- Tu peux versionner ce dossier dans Git : le `.gitignore` exclut déjà l'état et les fichiers sensibles.
+- Pense à {{ "`terraform destroy`" if tf else "`pulumi destroy`" }} quand tu as fini : les ressources consomment le quota du projet.

@@ -1,0 +1,48 @@
+#cloud-config
+# Script exécuté une seule fois, au premier démarrage de la machine (cloud-init).
+#
+# Cette machine n'a pas d'IP publique : sur FelCloud, elle n'accède à Internet
+# qu'en passant par le proxy du bastion {{ proxy.bastion }}, à l'adresse ${proxy}:3128
+# (adresse remplie automatiquement par {{ "Terraform" if a.tool == "terraform" else "Pulumi" }}).
+
+write_files:
+{% include "common/_apt-fiable.j2" %}
+  # apt passe par le proxy
+  - path: /etc/apt/apt.conf.d/95felcloud-proxy
+    content: |
+      Acquire::http::Proxy "http://${proxy}:3128";
+      Acquire::https::Proxy "http://${proxy}:3128";
+  # curl, pip, git... aussi (pris en compte à la prochaine connexion)
+  - path: /etc/environment
+    append: true
+    content: |
+      http_proxy=http://${proxy}:3128
+      https_proxy=http://${proxy}:3128
+      HTTP_PROXY=http://${proxy}:3128
+      HTTPS_PROXY=http://${proxy}:3128
+      no_proxy=localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+  # Le bastion démarre en même temps que cette machine et installe son proxy :
+  # on attend qu'il relaie vraiment une requête vers Internet (30 minutes au plus).
+  - path: /usr/local/sbin/attendre-proxy
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      for i in $(seq 1 180); do
+        status=$( { exec 3<>/dev/tcp/${proxy}/3128 &&
+                    printf 'HEAD http://deb.debian.org/ HTTP/1.0\r\n\r\n' >&3 &&
+                    read -r -t 10 line <&3 && echo "$line"; } 2>/dev/null )
+        case "$status" in "HTTP/1."?" "[23]*) echo "proxy prêt"; exit 0 ;; esac
+        sleep 10
+      done
+      echo "le proxy ${proxy}:3128 ne répond pas" >&2
+      exit 1
+
+runcmd:
+  - /usr/local/sbin/attendre-proxy
+{% if private_nginx %}
+  - /usr/local/sbin/apt-fiable nginx
+  - echo "<h1>Bonjour depuis $(hostname)</h1><p>Machine créée avec felcloud ({{ a.project }}), Internet via le proxy.</p>" > /var/www/html/index.html
+  - systemctl enable --now nginx
+{% else %}
+  - /usr/local/sbin/apt-fiable
+{% endif %}

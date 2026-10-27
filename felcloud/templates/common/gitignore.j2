@@ -1,0 +1,19 @@
+# Ne jamais versionner les identifiants ni les clés privées
+clouds.yaml
+*.pem
+{% if a.tool == "terraform" %}
+
+# Terraform : plugins téléchargés et état (l'état contient les adresses et identifiants des ressources)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+{% else %}
+
+# Pulumi : état (il contient les adresses et identifiants des ressources) et dépendances
+.pulumi-state/
+venv/
+__pycache__/
+node_modules/
+{% endif %}

@@ -1,0 +1,7 @@
+# Clé SSH : seule la partie PUBLIQUE est envoyée au cloud. Elle est injectée dans
+# les machines au premier démarrage. La clé privée ({{ a.keypair.private_key_path }})
+# ne quitte jamais ta machine.
+resource "openstack_compute_keypair_v2" "main" {
+  name       = {{ a.keypair.name | tojson }}
+  public_key = file(pathexpand({{ a.keypair.public_key_path | tojson }}))
+}

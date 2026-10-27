@@ -1,0 +1,16 @@
+# Description du projet Pulumi.
+name: {{ a.project }}
+description: Infrastructure OpenStack générée par felcloud
+
+# Programme en Python. `pulumi install` crée l'environnement virtuel venv/ et y
+# installe les bibliothèques listées dans requirements.txt.
+runtime:
+  name: python
+  options:
+    toolchain: pip
+    virtualenv: venv
+
+# L'état (l'inventaire de ce qui a été créé) est rangé dans ce dossier, dans
+# .pulumi-state/ : pas besoin de compte Pulumi. Ne supprime pas ce dossier.
+backend:
+  url: file://.pulumi-state

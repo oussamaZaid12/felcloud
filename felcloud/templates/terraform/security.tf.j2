@@ -1,0 +1,101 @@
+{% set sg = a.security_group %}
+# Pare-feu (security group). Tout le trafic ENTRANT est bloqué par défaut :
+# chaque règle ci-dessous ouvre une porte précise. Le trafic sortant est autorisé.
+resource "openstack_networking_secgroup_v2" "main" {
+  name        = "{{ a.project }}-sg"
+  description = "Pare-feu du projet {{ a.project }} (généré par felcloud)"
+}
+{% if "ssh" in sg.rules %}
+
+# SSH (port 22) : se connecter aux machines.
+resource "openstack_networking_secgroup_rule_v2" "ssh" {
+  security_group_id = openstack_networking_secgroup_v2.main.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 22
+  port_range_max    = 22
+  remote_ip_prefix  = {{ sg.ssh_cidr | tojson }}
+}
+{% endif %}
+{% if "http" in sg.rules %}
+
+# HTTP (port 80) : site web.
+resource "openstack_networking_secgroup_rule_v2" "http" {
+  security_group_id = openstack_networking_secgroup_v2.main.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 80
+  port_range_max    = 80
+  remote_ip_prefix  = "0.0.0.0/0"
+}
+{% endif %}
+{% if "https" in sg.rules %}
+
+# HTTPS (port 443) : site web sécurisé.
+resource "openstack_networking_secgroup_rule_v2" "https" {
+  security_group_id = openstack_networking_secgroup_v2.main.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 443
+  port_range_max    = 443
+  remote_ip_prefix  = "0.0.0.0/0"
+}
+{% endif %}
+{% if "icmp" in sg.rules %}
+
+# Ping (ICMP) : vérifier qu'une machine répond.
+resource "openstack_networking_secgroup_rule_v2" "icmp" {
+  security_group_id = openstack_networking_secgroup_v2.main.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "icmp"
+  remote_ip_prefix  = "0.0.0.0/0"
+}
+{% endif %}
+{% if "internal" in sg.rules %}
+
+# Trafic libre entre les machines de ce pare-feu : la source n'est pas une plage
+# d'adresses mais le groupe lui-même. Reste valable si tu ajoutes des machines.
+resource "openstack_networking_secgroup_rule_v2" "internal" {
+  security_group_id = openstack_networking_secgroup_v2.main.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  remote_group_id   = openstack_networking_secgroup_v2.main.id
+}
+{% endif %}
+{% if proxy and "internal" not in sg.rules %}
+
+# Proxy (port 3128) du bastion {{ proxy.bastion }}, réservé aux machines du projet :
+# c'est par lui que les machines sans IP publique accèdent à Internet.
+resource "openstack_networking_secgroup_rule_v2" "proxy" {
+  security_group_id = openstack_networking_secgroup_v2.main.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 3128
+  port_range_max    = 3128
+  remote_group_id   = openstack_networking_secgroup_v2.main.id
+}
+{% endif %}
+{% if sg.custom_tcp_ports %}
+
+# Ports TCP supplémentaires. Pour en ouvrir d'autres, ajoute-les à cette liste.
+locals {
+  custom_tcp_ports = {{ sg.custom_tcp_ports | tojson }}
+}
+
+resource "openstack_networking_secgroup_rule_v2" "custom" {
+  for_each = toset([for port in local.custom_tcp_ports : tostring(port)])
+
+  security_group_id = openstack_networking_secgroup_v2.main.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = tonumber(each.value)
+  port_range_max    = tonumber(each.value)
+  remote_ip_prefix  = "0.0.0.0/0"
+}
+{% endif %}

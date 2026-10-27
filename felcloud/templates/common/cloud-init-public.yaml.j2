@@ -1,0 +1,11 @@
+#cloud-config
+# Script exécuté une seule fois, au premier démarrage de la machine (cloud-init).
+# Machine avec IP publique : elle accède directement à Internet et installe nginx.
+
+write_files:
+{% include "common/_apt-fiable.j2" %}
+
+runcmd:
+  - /usr/local/sbin/apt-fiable nginx
+  - echo "<h1>Bonjour depuis $(hostname)</h1><p>Machine créée avec felcloud ({{ a.project }}).</p>" > /var/www/html/index.html
+  - systemctl enable --now nginx

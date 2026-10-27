@@ -1,0 +1,362 @@
+{% set net = a.network %}
+// Projet {{ a.project }} — généré par felcloud le {{ generated_on }}.
+//
+// Pulumi exécute ce programme JavaScript et crée sur le cloud « {{ a.cloud }} » les
+// ressources qu'il décrit. Lis-le de haut en bas : chaque bloc crée une ressource.
+// Pulumi déduit tout seul l'ordre de création à partir des liens entre elles
+// (par exemple networkId: network.id : le réseau doit exister avant le sous-réseau).
+
+"use strict";
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const pulumi = require("@pulumi/pulumi");
+const openstack = require("@pulumi/openstack");
+
+const PROJECT = {{ a.project | tojson }};
+
+// ---------------------------------------------------------------------------
+// Connexion au cloud
+// ---------------------------------------------------------------------------
+// Aucun mot de passe ni secret ici : Pulumi lit l'entrée {{ a.cloud | tojson }} du
+// fichier ~/.config/openstack/clouds.yaml, qui reste sur ta machine.
+const provider = new openstack.Provider("openstack", { cloud: {{ a.cloud | tojson }} });
+const opts = { provider };
+{% if net %}
+
+// ---------------------------------------------------------------------------
+// Réseau
+// ---------------------------------------------------------------------------
+{% if net.external_network %}
+// Réseau externe fourni par le cloud : source des adresses IP publiques. On ne le
+// crée pas, on le lit (fonction get...).
+const externalNetwork = openstack.networking.getNetworkOutput(
+    { name: {{ net.external_network | tojson }}, external: true },
+    { provider },
+);
+{% endif %}
+{% if net.mode == "create" %}
+
+// Réseau privé du projet : les machines y reçoivent une adresse interne.
+const network = new openstack.networking.Network("network", {
+    name: `${PROJECT}-net`,
+    adminStateUp: true,
+}, opts);
+
+// Plage d'adresses du réseau privé. Le DHCP distribue les adresses aux machines ;
+// les serveurs DNS servent aux machines qui ont accès à Internet.
+const subnet = new openstack.networking.Subnet("subnet", {
+    name: `${PROJECT}-subnet`,
+    networkId: network.id,
+    cidr: {{ net.cidr | tojson }},
+    ipVersion: 4,
+    enableDhcp: true,
+    dnsNameservers: {{ net.dns | tojson }},
+}, opts);
+
+// Routeur relié au réseau externe : indispensable pour rattacher des IP publiques.
+// Attention : sur FelCloud, il ne donne PAS Internet aux machines sans IP publique.
+const router = new openstack.networking.Router("router", {
+    name: `${PROJECT}-router`,
+    externalNetworkId: externalNetwork.id,
+}, opts);
+
+// Branche le sous-réseau privé sur le routeur.
+const routerInterface = new openstack.networking.RouterInterface("router-interface", {
+    routerId: router.id,
+    subnetId: subnet.id,
+}, opts);
+
+const networkId = network.id;
+{% else %}
+
+// Réseau existant du projet, choisi dans l'assistant. On le lit sans le gérer :
+// `pulumi destroy` ne le supprimera pas.
+const existingNetwork = openstack.networking.getNetworkOutput({ name: {{ net.name | tojson }} }, { provider });
+const networkId = existingNetwork.id;
+{% endif %}
+{% endif %}
+{% if a.security_group %}
+{% set sgr = a.security_group %}
+
+// ---------------------------------------------------------------------------
+// Pare-feu (security group)
+// ---------------------------------------------------------------------------
+// Tout le trafic ENTRANT est bloqué par défaut : chaque règle ouvre une porte précise.
+// Le trafic sortant est autorisé.
+const securityGroup = new openstack.networking.SecGroup("secgroup", {
+    name: `${PROJECT}-sg`,
+    description: `Pare-feu du projet ${PROJECT} (généré par felcloud)`,
+}, opts);
+{% if "ssh" in sgr.rules %}
+
+// SSH (port 22) : se connecter aux machines.
+new openstack.networking.SecGroupRule("rule-ssh", {
+    securityGroupId: securityGroup.id,
+    direction: "ingress",
+    ethertype: "IPv4",
+    protocol: "tcp",
+    portRangeMin: 22,
+    portRangeMax: 22,
+    remoteIpPrefix: {{ sgr.ssh_cidr | tojson }},
+}, opts);
+{% endif %}
+{% if "http" in sgr.rules %}
+
+// HTTP (port 80) : site web.
+new openstack.networking.SecGroupRule("rule-http", {
+    securityGroupId: securityGroup.id,
+    direction: "ingress",
+    ethertype: "IPv4",
+    protocol: "tcp",
+    portRangeMin: 80,
+    portRangeMax: 80,
+    remoteIpPrefix: "0.0.0.0/0",
+}, opts);
+{% endif %}
+{% if "https" in sgr.rules %}
+
+// HTTPS (port 443) : site web sécurisé.
+new openstack.networking.SecGroupRule("rule-https", {
+    securityGroupId: securityGroup.id,
+    direction: "ingress",
+    ethertype: "IPv4",
+    protocol: "tcp",
+    portRangeMin: 443,
+    portRangeMax: 443,
+    remoteIpPrefix: "0.0.0.0/0",
+}, opts);
+{% endif %}
+{% if "icmp" in sgr.rules %}
+
+// Ping (ICMP) : vérifier qu'une machine répond.
+new openstack.networking.SecGroupRule("rule-icmp", {
+    securityGroupId: securityGroup.id,
+    direction: "ingress",
+    ethertype: "IPv4",
+    protocol: "icmp",
+    remoteIpPrefix: "0.0.0.0/0",
+}, opts);
+{% endif %}
+{% if "internal" in sgr.rules %}
+
+// Trafic libre entre les machines de ce pare-feu : la source autorisée est le
+// groupe lui-même. La règle reste valable si tu ajoutes des machines.
+new openstack.networking.SecGroupRule("rule-internal", {
+    securityGroupId: securityGroup.id,
+    direction: "ingress",
+    ethertype: "IPv4",
+    remoteGroupId: securityGroup.id,
+}, opts);
+{% elif proxy %}
+
+// Proxy (port 3128) du bastion {{ proxy.bastion }}, réservé aux machines du projet :
+// c'est par lui que les machines sans IP publique accèdent à Internet.
+new openstack.networking.SecGroupRule("rule-proxy", {
+    securityGroupId: securityGroup.id,
+    direction: "ingress",
+    ethertype: "IPv4",
+    protocol: "tcp",
+    portRangeMin: 3128,
+    portRangeMax: 3128,
+    remoteGroupId: securityGroup.id,
+}, opts);
+{% endif %}
+{% if sgr.custom_tcp_ports %}
+
+// Ports TCP supplémentaires. Pour en ouvrir d'autres, ajoute-les à cette liste.
+const CUSTOM_TCP_PORTS = {{ sgr.custom_tcp_ports | tojson }};
+for (const port of CUSTOM_TCP_PORTS) {
+    new openstack.networking.SecGroupRule(`rule-tcp-${port}`, {
+        securityGroupId: securityGroup.id,
+        direction: "ingress",
+        ethertype: "IPv4",
+        protocol: "tcp",
+        portRangeMin: port,
+        portRangeMax: port,
+        remoteIpPrefix: "0.0.0.0/0",
+    }, opts);
+}
+{% endif %}
+{% endif %}
+{% if a.keypair %}
+
+// ---------------------------------------------------------------------------
+// Clé SSH
+// ---------------------------------------------------------------------------
+{% if a.keypair.mode == "existing" %}
+// Clé déjà enregistrée sur le cloud : on utilise simplement son nom.
+const keyPairName = {{ a.keypair.name | tojson }};
+{% else %}
+// Seule la partie PUBLIQUE est envoyée au cloud ; elle est injectée dans les
+// machines au premier démarrage. La clé privée ({{ a.keypair.private_key_path }})
+// ne quitte jamais ta machine.
+const publicKeyPath = {{ a.keypair.public_key_path | tojson }}.replace(/^~/, os.homedir());
+const keypair = new openstack.compute.Keypair("keypair", {
+    name: {{ a.keypair.name | tojson }},
+    publicKey: fs.readFileSync(publicKeyPath, "utf8").trim(),
+}, opts);
+const keyPairName = keypair.name;
+{% endif %}
+{% endif %}
+{% if a.instances %}
+
+// ---------------------------------------------------------------------------
+// Machines virtuelles
+// ---------------------------------------------------------------------------
+// La liste des machines. Pour en ajouter une, copie une ligne et change le nom.
+//   floatingIp : true = adresse publique. Sur FelCloud, c'est aussi la seule façon
+//                d'accéder directement à Internet.
+//   cloudInit  : script exécuté au premier démarrage ("" = aucun).
+const INSTANCES = {
+{% for vm in a.instances %}
+    {{ vm.name | tojson }}: { image: {{ vm.image | tojson }}, flavor: {{ vm.flavor | tojson }}, floatingIp: {{ vm.floating_ip | tojson }}, cloudInit: {{ cloud_init[vm.name] | tojson }}, sshUser: {{ vm.ssh_user | tojson }} },
+{% endfor %}
+};
+{% if net.mode == "create" %}
+
+// Le réseau doit être entièrement branché avant le démarrage des machines.
+const afterNetwork = { provider, dependsOn: [routerInterface] };
+{% else %}
+
+const afterNetwork = opts;
+{% endif %}
+
+// Carte réseau de chaque machine, créée explicitement : c'est sur elle qu'on
+// rattache le pare-feu et, si besoin, l'adresse IP publique.
+const ports = {};
+for (const name of Object.keys(INSTANCES)) {
+    ports[name] = new openstack.networking.Port(`${name}-port`, {
+        name: `${name}-port`,
+        networkId: networkId,
+        adminStateUp: true,
+{% if sg %}
+        securityGroupIds: [securityGroup.id],
+{% endif %}
+{% if net.mode == "create" %}
+        fixedIps: [{ subnetId: subnet.id }],
+{% endif %}
+    }, opts);
+}
+{% if proxy %}
+
+// Adresse privée du bastion {{ proxy.bastion }}, dont le proxy (port 3128) donne
+// Internet aux machines sans IP publique. Elle est insérée dans leur script de démarrage.
+const proxyAddress = ports[{{ proxy.bastion | tojson }}].allFixedIps.apply(ips => ips[0]);
+{% endif %}
+{% if roles_used %}
+
+// Contenu du script cloud-init de la machine (ou undefined).
+function startupScript(vm) {
+    if (!vm.cloudInit) {
+        return undefined;
+    }
+    const text = fs.readFileSync(path.join(__dirname, vm.cloudInit), "utf8");
+{% if proxy %}
+    if (text.includes("${proxy}")) {
+        return proxyAddress.apply(ip => text.replaceAll("${proxy}", ip));
+    }
+{% endif %}
+    return text;
+}
+{% endif %}
+
+const instances = {};
+for (const [name, vm] of Object.entries(INSTANCES)) {
+    instances[name] = new openstack.compute.Instance(name, {
+        name: name,
+        imageName: vm.image,
+        flavorName: vm.flavor,
+{% if keypair_ref %}
+        keyPair: keyPairName,
+{% endif %}
+        // Clé SSH et script de démarrage fournis sur un petit disque attaché à la
+        // machine : plus fiable que le service réseau de métadonnées.
+        configDrive: true,
+{% if roles_used %}
+        userData: startupScript(vm),
+{% endif %}
+        networks: [{ port: ports[name].id }],
+    }, afterNetwork);
+}
+{% if any_fip %}
+
+// Adresses IP publiques, pour les machines marquées floatingIp: true.
+// subnetId est précisé en plus du pool : sur FelCloud, une allocation par le
+// seul nom du réseau peut échouer avec « ExternalIpAddressExhausted ».
+const floatingIps = {};
+for (const [name, vm] of Object.entries(INSTANCES)) {
+    if (vm.floatingIp) {
+        floatingIps[name] = new openstack.networking.FloatingIp(`${name}-fip`, {
+            pool: externalNetwork.name,
+            subnetId: externalNetwork.subnets.apply(subnets => subnets[0]),
+            portId: ports[name].id,
+        }, afterNetwork);
+    }
+}
+{% endif %}
+{% endif %}
+{% if a.volumes %}
+
+// ---------------------------------------------------------------------------
+// Volumes : des disques supplémentaires, indépendants des machines
+// ---------------------------------------------------------------------------
+const VOLUMES = {
+{% for vol in a.volumes %}
+    {{ vol.name | tojson }}: { sizeGb: {{ vol.size }}, type: {{ (vol.type or none) | tojson }}, attachTo: {{ (vol.attach_to or none) | tojson }} },
+{% endfor %}
+};
+
+for (const [name, vol] of Object.entries(VOLUMES)) {
+    const volume = new openstack.blockstorage.Volume(name, {
+        name: name,
+        size: vol.sizeGb,
+        volumeType: vol.type ?? undefined,
+    }, opts);
+    // Branchement sur une machine : le disque y apparaît comme /dev/vdb (puis vdc...).
+    // Il faut encore le formater et le monter (voir README.md).
+    if (vol.attachTo) {
+        new openstack.compute.VolumeAttach(`${name}-attach`, {
+            instanceId: instances[vol.attachTo].id,
+            volumeId: volume.id,
+        }, opts);
+    }
+}
+{% endif %}
+
+// ---------------------------------------------------------------------------
+// Sorties : affichées à la fin de `pulumi up`, et à tout moment avec
+// `pulumi stack output`
+// ---------------------------------------------------------------------------
+{% if a.instances %}
+exports.machines = Object.fromEntries(Object.entries(instances).map(([name, instance]) => [name, {
+    ip_privee: instance.accessIpV4,
+{% if any_fip %}
+    ip_publique: floatingIps[name] ? floatingIps[name].address : "aucune",
+{% else %}
+    ip_publique: "aucune",
+{% endif %}
+}]));
+{% if any_fip %}
+
+// Commandes pour se connecter (patiente ~2 minutes après la création).
+const SSH_KEY = {{ (private_key or "<ta-clé-privée>") | tojson }};
+exports.ssh = Object.fromEntries(Object.entries(floatingIps).map(([name, fip]) => [name,
+    pulumi.interpolate`ssh -i ${SSH_KEY} ${INSTANCES[name].sshUser}@${fip.address}`,
+]));
+{% if has_private_vms %}
+
+// Les machines sans IP publique se rejoignent en passant par {{ jump.name }} (« rebond »).
+// ProxyCommand transmet la clé aux deux connexions, contrairement à -J.
+const JUMP = {{ jump.name | tojson }};
+exports.ssh_via_rebond = Object.fromEntries(Object.entries(instances)
+    .filter(([name]) => !INSTANCES[name].floatingIp)
+    .map(([name, instance]) => [name,
+        pulumi.interpolate`ssh -i ${SSH_KEY} -o ProxyCommand='ssh -i ${SSH_KEY} -W %h:%p ${INSTANCES[JUMP].sshUser}@${floatingIps[JUMP].address}' ${INSTANCES[name].sshUser}@${instance.accessIpV4}`,
+    ]));
+{% endif %}
+{% endif %}
+{% endif %}
+{% if net and net.mode == "create" %}
+exports.reseau = pulumi.interpolate`${network.name} (${subnet.cidr})`;
+{% endif %}

@@ -1,0 +1,534 @@
+{% set net = a.network %}
+{% set has_vms = a.instances | length > 0 %}
+{% set key_file = a.keypair and a.keypair.mode != "existing" %}
+// Projet {{ a.project }} — généré par felcloud le {{ generated_on }}.
+//
+// Pulumi compile puis exécute ce programme Go, qui crée sur le cloud « {{ a.cloud }} »
+// les ressources qu'il décrit. Lis-le de haut en bas : chaque bloc crée une ressource.
+// Pulumi déduit tout seul l'ordre de création à partir des liens entre elles
+// (par exemple NetworkId: network.ID() : le réseau doit exister avant le sous-réseau).
+//
+// En Go, chaque création renvoie une erreur éventuelle : « if err != nil { return err } »
+// arrête le programme proprement si le cloud refuse quelque chose.
+package main
+
+import (
+{% if key_file or roles_used %}
+	"os"
+{% endif %}
+{% if a.security_group and a.security_group.custom_tcp_ports %}
+	"strconv"
+{% endif %}
+{% if key_file or proxy %}
+	"strings"
+{% endif %}
+
+	"github.com/pulumi/pulumi-openstack/sdk/v5/go/openstack"
+{% if a.volumes %}
+	"github.com/pulumi/pulumi-openstack/sdk/v5/go/openstack/blockstorage"
+{% endif %}
+{% if a.keypair or has_vms %}
+	"github.com/pulumi/pulumi-openstack/sdk/v5/go/openstack/compute"
+{% endif %}
+{% if net or a.security_group %}
+	"github.com/pulumi/pulumi-openstack/sdk/v5/go/openstack/networking"
+{% endif %}
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+)
+
+const project = {{ a.project | tojson }}
+{% if has_vms %}
+
+// Machine décrit une machine virtuelle du projet.
+//   FloatingIp : true = adresse publique. Sur FelCloud, c'est aussi la seule façon
+//                d'accéder directement à Internet.
+//   CloudInit  : script exécuté au premier démarrage ("" = aucun).
+type Machine struct {
+	Name       string
+	Image      string
+	Flavor     string
+	FloatingIp bool
+	CloudInit  string
+	SshUser    string
+}
+
+// La liste des machines. Pour en ajouter une, copie une ligne et change le nom.
+var machines = []Machine{
+{% for vm in a.instances %}
+	{Name: {{ vm.name | tojson }}, Image: {{ vm.image | tojson }}, Flavor: {{ vm.flavor | tojson }}, FloatingIp: {{ vm.floating_ip | tojson }}, CloudInit: {{ cloud_init[vm.name] | tojson }}, SshUser: {{ vm.ssh_user | tojson }}},
+{% endfor %}
+}
+{% endif %}
+{% if a.volumes %}
+
+// Volume décrit un disque supplémentaire, indépendant des machines.
+type Volume struct {
+	Name     string
+	SizeGb   int
+	Type     string // "" = type par défaut du cloud
+	AttachTo string // "" = non attaché
+}
+
+var volumes = []Volume{
+{% for vol in a.volumes %}
+	{Name: {{ vol.name | tojson }}, SizeGb: {{ vol.size }}, Type: {{ (vol.type or "") | tojson }}, AttachTo: {{ (vol.attach_to or "") | tojson }}},
+{% endfor %}
+}
+{% endif %}
+
+func main() {
+	pulumi.Run(func(ctx *pulumi.Context) error {
+		// -------------------------------------------------------------------
+		// Connexion au cloud
+		// -------------------------------------------------------------------
+		// Aucun mot de passe ni secret ici : Pulumi lit l'entrée {{ a.cloud | tojson }}
+		// du fichier ~/.config/openstack/clouds.yaml, qui reste sur ta machine.
+		provider, err := openstack.NewProvider(ctx, "openstack", &openstack.ProviderArgs{
+			Cloud: pulumi.String({{ a.cloud | tojson }}),
+		})
+		if err != nil {
+			return err
+		}
+		opts := pulumi.Provider(provider)
+{% if net %}
+
+		// -------------------------------------------------------------------
+		// Réseau
+		// -------------------------------------------------------------------
+{% if net.external_network %}
+		// Réseau externe fourni par le cloud : source des adresses IP publiques.
+		// On ne le crée pas, on le lit (fonction Lookup...).
+		externalNetwork, err := networking.LookupNetwork(ctx, &networking.LookupNetworkArgs{
+			Name:     pulumi.StringRef({{ net.external_network | tojson }}),
+			External: pulumi.BoolRef(true),
+		}, opts)
+		if err != nil {
+			return err
+		}
+{% endif %}
+{% if net.mode == "create" %}
+
+		// Réseau privé du projet : les machines y reçoivent une adresse interne.
+		network, err := networking.NewNetwork(ctx, "network", &networking.NetworkArgs{
+			Name:         pulumi.String(project + "-net"),
+			AdminStateUp: pulumi.Bool(true),
+		}, opts)
+		if err != nil {
+			return err
+		}
+
+		// Plage d'adresses du réseau privé. Le DHCP distribue les adresses aux
+		// machines ; les serveurs DNS servent à celles qui ont accès à Internet.
+		subnet, err := networking.NewSubnet(ctx, "subnet", &networking.SubnetArgs{
+			Name:           pulumi.String(project + "-subnet"),
+			NetworkId:      network.ID(),
+			Cidr:           pulumi.String({{ net.cidr | tojson }}),
+			IpVersion:      pulumi.Int(4),
+			EnableDhcp:     pulumi.Bool(true),
+			DnsNameservers: pulumi.ToStringArray([]string{ {{- net.dns | map("tojson") | join(", ") -}} }),
+		}, opts)
+		if err != nil {
+			return err
+		}
+
+		// Routeur relié au réseau externe : indispensable pour rattacher des IP
+		// publiques. Attention : sur FelCloud, il ne donne PAS Internet aux
+		// machines sans IP publique.
+		router, err := networking.NewRouter(ctx, "router", &networking.RouterArgs{
+			Name:              pulumi.String(project + "-router"),
+			ExternalNetworkId: pulumi.String(externalNetwork.Id),
+		}, opts)
+		if err != nil {
+			return err
+		}
+
+		// Branche le sous-réseau privé sur le routeur.
+		{{ "routerInterface" if has_vms else "_" }}, err {{ ":=" if has_vms else "=" }} networking.NewRouterInterface(ctx, "router-interface", &networking.RouterInterfaceArgs{
+			RouterId: router.ID(),
+			SubnetId: subnet.ID(),
+		}, opts)
+		if err != nil {
+			return err
+		}
+{% if has_vms %}
+		networkId := network.ID()
+{% endif %}
+{% elif has_vms %}
+
+		// Réseau existant du projet, choisi dans l'assistant. On le lit sans le
+		// gérer : `pulumi destroy` ne le supprimera pas.
+		existingNetwork, err := networking.LookupNetwork(ctx, &networking.LookupNetworkArgs{
+			Name: pulumi.StringRef({{ net.name | tojson }}),
+		}, opts)
+		if err != nil {
+			return err
+		}
+		networkId := pulumi.String(existingNetwork.Id)
+{% endif %}
+{% endif %}
+{% if a.security_group %}
+{% set sgr = a.security_group %}
+{% set sg_used = sgr.rules or sgr.custom_tcp_ports or proxy or has_vms %}
+
+		// -------------------------------------------------------------------
+		// Pare-feu (security group)
+		// -------------------------------------------------------------------
+		// Tout le trafic ENTRANT est bloqué par défaut : chaque règle ouvre une
+		// porte précise. Le trafic sortant est autorisé.
+		{{ "securityGroup" if sg_used else "_" }}, err {{ ":=" if sg_used else "=" }} networking.NewSecGroup(ctx, "secgroup", &networking.SecGroupArgs{
+			Name:        pulumi.String(project + "-sg"),
+			Description: pulumi.String("Pare-feu du projet " + project + " (généré par felcloud)"),
+		}, opts)
+		if err != nil {
+			return err
+		}
+{% if "ssh" in sgr.rules %}
+
+		// SSH (port 22) : se connecter aux machines.
+		_, err = networking.NewSecGroupRule(ctx, "rule-ssh", &networking.SecGroupRuleArgs{
+			SecurityGroupId: securityGroup.ID(),
+			Direction:       pulumi.String("ingress"),
+			Ethertype:       pulumi.String("IPv4"),
+			Protocol:        pulumi.String("tcp"),
+			PortRangeMin:    pulumi.Int(22),
+			PortRangeMax:    pulumi.Int(22),
+			RemoteIpPrefix:  pulumi.String({{ sgr.ssh_cidr | tojson }}),
+		}, opts)
+		if err != nil {
+			return err
+		}
+{% endif %}
+{% if "http" in sgr.rules %}
+
+		// HTTP (port 80) : site web.
+		_, err = networking.NewSecGroupRule(ctx, "rule-http", &networking.SecGroupRuleArgs{
+			SecurityGroupId: securityGroup.ID(),
+			Direction:       pulumi.String("ingress"),
+			Ethertype:       pulumi.String("IPv4"),
+			Protocol:        pulumi.String("tcp"),
+			PortRangeMin:    pulumi.Int(80),
+			PortRangeMax:    pulumi.Int(80),
+			RemoteIpPrefix:  pulumi.String("0.0.0.0/0"),
+		}, opts)
+		if err != nil {
+			return err
+		}
+{% endif %}
+{% if "https" in sgr.rules %}
+
+		// HTTPS (port 443) : site web sécurisé.
+		_, err = networking.NewSecGroupRule(ctx, "rule-https", &networking.SecGroupRuleArgs{
+			SecurityGroupId: securityGroup.ID(),
+			Direction:       pulumi.String("ingress"),
+			Ethertype:       pulumi.String("IPv4"),
+			Protocol:        pulumi.String("tcp"),
+			PortRangeMin:    pulumi.Int(443),
+			PortRangeMax:    pulumi.Int(443),
+			RemoteIpPrefix:  pulumi.String("0.0.0.0/0"),
+		}, opts)
+		if err != nil {
+			return err
+		}
+{% endif %}
+{% if "icmp" in sgr.rules %}
+
+		// Ping (ICMP) : vérifier qu'une machine répond.
+		_, err = networking.NewSecGroupRule(ctx, "rule-icmp", &networking.SecGroupRuleArgs{
+			SecurityGroupId: securityGroup.ID(),
+			Direction:       pulumi.String("ingress"),
+			Ethertype:       pulumi.String("IPv4"),
+			Protocol:        pulumi.String("icmp"),
+			RemoteIpPrefix:  pulumi.String("0.0.0.0/0"),
+		}, opts)
+		if err != nil {
+			return err
+		}
+{% endif %}
+{% if "internal" in sgr.rules %}
+
+		// Trafic libre entre les machines de ce pare-feu : la source autorisée est
+		// le groupe lui-même. La règle reste valable si tu ajoutes des machines.
+		_, err = networking.NewSecGroupRule(ctx, "rule-internal", &networking.SecGroupRuleArgs{
+			SecurityGroupId: securityGroup.ID(),
+			Direction:       pulumi.String("ingress"),
+			Ethertype:       pulumi.String("IPv4"),
+			RemoteGroupId:   securityGroup.ID(),
+		}, opts)
+		if err != nil {
+			return err
+		}
+{% elif proxy %}
+
+		// Proxy (port 3128) du bastion {{ proxy.bastion }}, réservé aux machines du
+		// projet : c'est par lui que les machines sans IP publique accèdent à Internet.
+		_, err = networking.NewSecGroupRule(ctx, "rule-proxy", &networking.SecGroupRuleArgs{
+			SecurityGroupId: securityGroup.ID(),
+			Direction:       pulumi.String("ingress"),
+			Ethertype:       pulumi.String("IPv4"),
+			Protocol:        pulumi.String("tcp"),
+			PortRangeMin:    pulumi.Int(3128),
+			PortRangeMax:    pulumi.Int(3128),
+			RemoteGroupId:   securityGroup.ID(),
+		}, opts)
+		if err != nil {
+			return err
+		}
+{% endif %}
+{% if sgr.custom_tcp_ports %}
+
+		// Ports TCP supplémentaires. Pour en ouvrir d'autres, ajoute-les à cette liste.
+		customTcpPorts := []int{ {{- sgr.custom_tcp_ports | join(", ") -}} }
+		for _, port := range customTcpPorts {
+			_, err = networking.NewSecGroupRule(ctx, "rule-tcp-"+strconv.Itoa(port), &networking.SecGroupRuleArgs{
+				SecurityGroupId: securityGroup.ID(),
+				Direction:       pulumi.String("ingress"),
+				Ethertype:       pulumi.String("IPv4"),
+				Protocol:        pulumi.String("tcp"),
+				PortRangeMin:    pulumi.Int(port),
+				PortRangeMax:    pulumi.Int(port),
+				RemoteIpPrefix:  pulumi.String("0.0.0.0/0"),
+			}, opts)
+			if err != nil {
+				return err
+			}
+		}
+{% endif %}
+{% endif %}
+{% if a.keypair %}
+
+		// -------------------------------------------------------------------
+		// Clé SSH
+		// -------------------------------------------------------------------
+{% if a.keypair.mode == "existing" %}
+		// Clé déjà enregistrée sur le cloud : on utilise simplement son nom.
+{% if has_vms %}
+		keyPairName := pulumi.String({{ a.keypair.name | tojson }})
+{% endif %}
+{% else %}
+		// Seule la partie PUBLIQUE est envoyée au cloud ; elle est injectée dans
+		// les machines au premier démarrage. La clé privée
+		// ({{ a.keypair.private_key_path }}) ne quitte jamais ta machine.
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		publicKey, err := os.ReadFile(strings.Replace({{ a.keypair.public_key_path | tojson }}, "~", home, 1))
+		if err != nil {
+			return err
+		}
+		{{ "keypair" if has_vms else "_" }}, err {{ ":=" if has_vms else "=" }} compute.NewKeypair(ctx, "keypair", &compute.KeypairArgs{
+			Name:      pulumi.String({{ a.keypair.name | tojson }}),
+			PublicKey: pulumi.String(strings.TrimSpace(string(publicKey))),
+		}, opts)
+		if err != nil {
+			return err
+		}
+{% if has_vms %}
+		keyPairName := keypair.Name
+{% endif %}
+{% endif %}
+{% endif %}
+{% if has_vms %}
+
+		// -------------------------------------------------------------------
+		// Machines virtuelles (leur liste est en haut du fichier : machines)
+		// -------------------------------------------------------------------
+{% if net.mode == "create" %}
+		// Le réseau doit être entièrement branché avant le démarrage des machines.
+		afterNetwork := pulumi.DependsOn([]pulumi.Resource{routerInterface})
+{% else %}
+		afterNetwork := pulumi.DependsOn(nil)
+{% endif %}
+
+		// Carte réseau de chaque machine, créée explicitement : c'est sur elle
+		// qu'on rattache le pare-feu et, si besoin, l'adresse IP publique.
+		ports := map[string]*networking.Port{}
+		for _, vm := range machines {
+			port, err := networking.NewPort(ctx, vm.Name+"-port", &networking.PortArgs{
+				Name:         pulumi.String(vm.Name + "-port"),
+				NetworkId:    networkId,
+				AdminStateUp: pulumi.Bool(true),
+{% if sg %}
+				SecurityGroupIds: pulumi.StringArray{securityGroup.ID()},
+{% endif %}
+{% if net.mode == "create" %}
+				FixedIps: networking.PortFixedIpArray{
+					&networking.PortFixedIpArgs{SubnetId: subnet.ID()},
+				},
+{% endif %}
+			}, opts)
+			if err != nil {
+				return err
+			}
+			ports[vm.Name] = port
+		}
+{% if proxy %}
+
+		// Adresse privée du bastion {{ proxy.bastion }}, dont le proxy (port 3128) donne
+		// Internet aux machines sans IP publique. Elle est insérée dans leur script
+		// de démarrage.
+		proxyAddress := ports[{{ proxy.bastion | tojson }}].AllFixedIps.Index(pulumi.Int(0))
+{% endif %}
+{% if roles_used %}
+
+		// Contenu du script cloud-init d'une machine (ou nil).
+		startupScript := func(vm Machine) (pulumi.StringPtrInput, error) {
+			if vm.CloudInit == "" {
+				return nil, nil
+			}
+			data, err := os.ReadFile(vm.CloudInit)
+			if err != nil {
+				return nil, err
+			}
+			text := string(data)
+{% if proxy %}
+			if strings.Contains(text, "${proxy}") {
+				return proxyAddress.ApplyT(func(ip string) string {
+					return strings.ReplaceAll(text, "${proxy}", ip)
+				}).(pulumi.StringOutput), nil
+			}
+{% endif %}
+			return pulumi.String(text), nil
+		}
+{% endif %}
+
+		instances := map[string]*compute.Instance{}
+		for _, vm := range machines {
+{% if roles_used %}
+			userData, err := startupScript(vm)
+			if err != nil {
+				return err
+			}
+{% endif %}
+			instance, err := compute.NewInstance(ctx, vm.Name, &compute.InstanceArgs{
+				Name:       pulumi.String(vm.Name),
+				ImageName:  pulumi.String(vm.Image),
+				FlavorName: pulumi.String(vm.Flavor),
+{% if keypair_ref %}
+				KeyPair:    keyPairName,
+{% endif %}
+				// Clé SSH et script de démarrage fournis sur un petit disque attaché
+				// à la machine : plus fiable que le service réseau de métadonnées.
+				ConfigDrive: pulumi.Bool(true),
+{% if roles_used %}
+				UserData:    userData,
+{% endif %}
+				Networks: compute.InstanceNetworkArray{
+					&compute.InstanceNetworkArgs{Port: ports[vm.Name].ID()},
+				},
+			}, opts, afterNetwork)
+			if err != nil {
+				return err
+			}
+			instances[vm.Name] = instance
+		}
+{% if any_fip %}
+
+		// Adresses IP publiques, pour les machines marquées FloatingIp: true.
+		// SubnetId est précisé en plus du pool : sur FelCloud, une allocation par
+		// le seul nom du réseau peut échouer avec « ExternalIpAddressExhausted ».
+		floatingIps := map[string]*networking.FloatingIp{}
+		for _, vm := range machines {
+			if !vm.FloatingIp {
+				continue
+			}
+			fip, err := networking.NewFloatingIp(ctx, vm.Name+"-fip", &networking.FloatingIpArgs{
+				Pool:     pulumi.String({{ net.external_network | tojson }}),
+				SubnetId: pulumi.String(externalNetwork.Subnets[0]),
+				PortId:   ports[vm.Name].ID(),
+			}, opts, afterNetwork)
+			if err != nil {
+				return err
+			}
+			floatingIps[vm.Name] = fip
+		}
+{% endif %}
+{% endif %}
+{% if a.volumes %}
+
+		// -------------------------------------------------------------------
+		// Volumes (leur liste est en haut du fichier : volumes)
+		// -------------------------------------------------------------------
+		for _, vol := range volumes {
+			args := &blockstorage.VolumeArgs{
+				Name: pulumi.String(vol.Name),
+				Size: pulumi.Int(vol.SizeGb),
+			}
+			if vol.Type != "" {
+				args.VolumeType = pulumi.String(vol.Type)
+			}
+			volume, err := blockstorage.NewVolume(ctx, vol.Name, args, opts)
+			if err != nil {
+				return err
+			}
+			// Branchement sur une machine : le disque y apparaît comme /dev/vdb
+			// (puis vdc...). Il faut encore le formater et le monter (voir README.md).
+			if vol.AttachTo != "" {
+				_, err = compute.NewVolumeAttach(ctx, vol.Name+"-attach", &compute.VolumeAttachArgs{
+					InstanceId: instances[vol.AttachTo].ID(),
+					VolumeId:   volume.ID(),
+				}, opts)
+				if err != nil {
+					return err
+				}
+			}
+		}
+{% endif %}
+
+		// -------------------------------------------------------------------
+		// Sorties : affichées à la fin de `pulumi up`, et à tout moment avec
+		// `pulumi stack output`
+		// -------------------------------------------------------------------
+{% if has_vms %}
+		machinesOutput := pulumi.Map{}
+		for _, vm := range machines {
+			var publicIP pulumi.Input = pulumi.String("aucune")
+{% if any_fip %}
+			if fip, ok := floatingIps[vm.Name]; ok {
+				publicIP = fip.Address
+			}
+{% endif %}
+			machinesOutput[vm.Name] = pulumi.Map{
+				"ip_privee":   instances[vm.Name].AccessIpV4,
+				"ip_publique": publicIP,
+			}
+		}
+		ctx.Export("machines", machinesOutput)
+{% if any_fip %}
+
+		// Commandes pour se connecter (patiente ~2 minutes après la création).
+		sshKey := {{ (private_key or "<ta-clé-privée>") | tojson }}
+		sshCommands := pulumi.Map{}
+		for _, vm := range machines {
+			if fip, ok := floatingIps[vm.Name]; ok {
+				sshCommands[vm.Name] = pulumi.Sprintf("ssh -i %s %s@%s", sshKey, vm.SshUser, fip.Address)
+			}
+		}
+		ctx.Export("ssh", sshCommands)
+{% if has_private_vms %}
+
+		// Les machines sans IP publique se rejoignent en passant par {{ jump.name }}
+		// (« rebond »). ProxyCommand transmet la clé aux deux connexions, contrairement à -J.
+		jump := {{ jump.name | tojson }}
+		jumpUser := {{ jump.ssh_user | tojson }}
+		jumpCommands := pulumi.Map{}
+		for _, vm := range machines {
+			if vm.FloatingIp {
+				continue
+			}
+			jumpCommands[vm.Name] = pulumi.Sprintf(
+				"ssh -i %s -o ProxyCommand='ssh -i %s -W %%h:%%p %s@%s' %s@%s",
+				sshKey, sshKey, jumpUser, floatingIps[jump].Address, vm.SshUser, instances[vm.Name].AccessIpV4,
+			)
+		}
+		ctx.Export("ssh_via_rebond", jumpCommands)
+{% endif %}
+{% endif %}
+{% endif %}
+{% if net and net.mode == "create" %}
+		ctx.Export("reseau", pulumi.Sprintf("%s (%s)", network.Name, subnet.Cidr))
+{% endif %}
+		_ = opts
+		return nil
+	})
+}

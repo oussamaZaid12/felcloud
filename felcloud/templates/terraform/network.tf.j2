@@ -1,0 +1,49 @@
+{% set net = a.network %}
+{% if net.external_network %}
+# Réseau externe fourni par le cloud : c'est la sortie vers Internet et la source
+# des adresses IP publiques. On ne le crée pas, on le lit (bloc « data »).
+data "openstack_networking_network_v2" "external" {
+  name     = {{ net.external_network | tojson }}
+  external = true
+}
+
+{% endif %}
+{% if net.mode == "create" %}
+# Réseau privé du projet : les machines y reçoivent une adresse interne.
+resource "openstack_networking_network_v2" "main" {
+  name           = "{{ a.project }}-net"
+  admin_state_up = true
+}
+
+# Plage d'adresses du réseau privé. Le DHCP distribue les adresses aux machines,
+# et les serveurs DNS leur permettent de résoudre les noms (pour celles qui ont
+# accès à Internet).
+resource "openstack_networking_subnet_v2" "main" {
+  name            = "{{ a.project }}-subnet"
+  network_id      = openstack_networking_network_v2.main.id
+  cidr            = {{ net.cidr | tojson }}
+  ip_version      = 4
+  enable_dhcp     = true
+  dns_nameservers = {{ net.dns | tojson }}
+}
+
+# Routeur : relie le réseau privé au réseau externe. Il est indispensable pour
+# rattacher des IP publiques aux machines. Attention : sur FelCloud, il ne donne
+# PAS accès à Internet aux machines sans IP publique.
+resource "openstack_networking_router_v2" "main" {
+  name                = "{{ a.project }}-router"
+  external_network_id = data.openstack_networking_network_v2.external.id
+}
+
+# Branche le sous-réseau privé sur le routeur.
+resource "openstack_networking_router_interface_v2" "main" {
+  router_id = openstack_networking_router_v2.main.id
+  subnet_id = openstack_networking_subnet_v2.main.id
+}
+{% else %}
+# Réseau existant du projet, choisi dans l'assistant. On le lit sans le gérer :
+# `terraform destroy` ne le supprimera pas.
+data "openstack_networking_network_v2" "main" {
+  name = {{ net.name | tojson }}
+}
+{% endif %}

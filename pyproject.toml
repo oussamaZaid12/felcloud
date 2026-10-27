@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "felcloud"
+version = "0.1.0"
+description = "Assistant interactif pour créer une infrastructure OpenStack (FelCloud) avec Terraform ou Pulumi"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "questionary>=2.0",
+    "rich>=13.0",
+    "jinja2>=3.1",
+    "openstacksdk>=3.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+felcloud = "felcloud.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["felcloud*"]
+
+[tool.setuptools.package-data]
+felcloud = ["catalog/*.yaml", "templates/**/*"]

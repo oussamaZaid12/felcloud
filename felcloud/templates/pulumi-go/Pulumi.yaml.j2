@@ -1,0 +1,12 @@
+# Description du projet Pulumi.
+name: {{ a.project }}
+description: Infrastructure OpenStack générée par felcloud
+
+# Programme en Go. Pulumi le compile puis l'exécute à chaque commande.
+# Les bibliothèques sont listées dans go.mod (go.sum fige leurs versions exactes).
+runtime: go
+
+# L'état (l'inventaire de ce qui a été créé) est rangé dans ce dossier, dans
+# .pulumi-state/ : pas besoin de compte Pulumi. Ne supprime pas ce dossier.
+backend:
+  url: file://.pulumi-state

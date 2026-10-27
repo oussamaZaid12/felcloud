@@ -1,0 +1,8 @@
+# Connexion au cloud.
+#
+# Aucun mot de passe ni secret ici : Terraform lit l'entrée {{ a.cloud | tojson }} du fichier
+# ~/.config/openstack/clouds.yaml, qui reste sur ta machine et ne doit jamais être versionné.
+
+provider "openstack" {
+  cloud = {{ a.cloud | tojson }}
+}

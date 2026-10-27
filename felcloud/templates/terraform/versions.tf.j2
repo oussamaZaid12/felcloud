@@ -1,0 +1,13 @@
+# Version de Terraform et du « provider » OpenStack (le plugin qui sait parler à OpenStack).
+# `terraform init` télécharge ce provider dans le dossier .terraform/.
+
+terraform {
+  required_version = ">= 1.6"
+
+  required_providers {
+    openstack = {
+      source  = "terraform-provider-openstack/openstack"
+      version = "~> 3.4"
+    }
+  }
+}

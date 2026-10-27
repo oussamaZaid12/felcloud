@@ -1,0 +1,47 @@
+# Informations affichées à la fin de `terraform apply`, et à tout moment avec
+# `terraform output`.
+{% if a.instances %}
+
+output "machines" {
+  description = "Adresses de chaque machine"
+  value = {
+    for name, vm in openstack_compute_instance_v2.vm : name => {
+      ip_privee   = vm.access_ip_v4
+{% if any_fip %}
+      ip_publique = try(openstack_networking_floatingip_v2.vm[name].address, "aucune")
+{% endif %}
+    }
+  }
+}
+{% if any_fip %}
+
+output "ssh" {
+  description = "Commandes pour se connecter (patiente ~2 minutes après la création)"
+  value = {
+    for name, ip in openstack_networking_floatingip_v2.vm :
+    name => "ssh -i {{ private_key or '<ta-clé-privée>' }} ${local.instances[name].ssh_user}@${ip.address}"
+  }
+}
+{% if has_private_vms %}
+
+# Les machines sans IP publique se rejoignent en passant par {{ jump.name }}
+# (« rebond »). ProxyCommand transmet la clé aux deux connexions, contrairement à -J.
+# Apostrophes simples : la commande se copie-colle telle quelle (bash, zsh, fish).
+output "ssh_via_rebond" {
+  description = "Commandes pour se connecter aux machines sans IP publique"
+  value = {
+    for name, vm in openstack_compute_instance_v2.vm :
+    name => "ssh -i {{ private_key or '<ta-clé-privée>' }} -o ProxyCommand='ssh -i {{ private_key or '<ta-clé-privée>' }} -W %h:%p ${local.instances[{{ jump.name | tojson }}].ssh_user}@${openstack_networking_floatingip_v2.vm[{{ jump.name | tojson }}].address}' ${local.instances[name].ssh_user}@${vm.access_ip_v4}"
+    if !local.instances[name].floating_ip
+  }
+}
+{% endif %}
+{% endif %}
+{% endif %}
+{% if a.network and a.network.mode == "create" %}
+
+output "reseau" {
+  description = "Réseau privé du projet"
+  value       = "${openstack_networking_network_v2.main.name} (${openstack_networking_subnet_v2.main.cidr})"
+}
+{% endif %}
